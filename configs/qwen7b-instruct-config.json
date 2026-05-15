@@ -5,23 +5,23 @@
         "split": "train",
         "subset": "high",
         "seed": 42,
-        "num_samples": 1000
+        "num_samples": 200
     },
     "oat_args": {
         "critic_type": "drgrpo",
-        "gpus": 1,
+        "gpus": 2,
         "num_gpus_per_actor": 1,
-        "collocate": true,
-        "vllm_gpu_ratio": 0.6,
+        "collocate": false,
+        "vllm_gpu_ratio": 0.95,
         "bf16": true,
-        "flash_attn": true,
+        "flash_attn": false,
         "gradient_checkpointing": true,
         "ref_offload": true,
         "zero_stage": 2,
-        "pretrain": "Qwen/Qwen2.5-7B-Instruct",
+        "pretrain": "Qwen/Qwen3-8B",
         "is_instruct": true,
         "learning_rate": 4e-06,
-        "num_ppo_epochs": 1,
+        "num_ppo_epochs": 2,
         "train_split": "train",
         "input_key": "article",
         "output_key": "questions",
@@ -29,7 +29,7 @@
         "num_prompt_epoch": 4,
         "prompt_max_length": 2048,
         "temperature": 1.0,
-        "top_p": 1.0,
+        "top_p": 0.95,
         "generate_max_length": 1024,
         "reasoning_num_samples": 8,
         "reasoning_max_tokens": 512,
@@ -42,8 +42,8 @@
         "incorrect_reward": 0.0,
         "rollout_batch_size": 8,
         "rollout_batch_size_per_device": 8,
-        "train_batch_size": 16,
-        "train_batch_size_per_device": 1,
+        "train_batch_size": 64,
+        "train_batch_size_per_device": 4,
         "save_steps": 200,
         "save_path": "oat-output/simpl",
         "lora_rank": 32,
@@ -61,6 +61,6 @@
         "use_wb": true,
         "wb_org": "anant-org",
         "wb_project": "SImpL-reasoning",
-        "wb_run_name": "qwen-7b-instruct"
+        "wb_run_name": "qwen-8b-instruct"
     }
 }

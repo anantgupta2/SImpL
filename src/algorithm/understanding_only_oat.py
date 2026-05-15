@@ -406,10 +406,15 @@ class UnderstandingOnlyActor(PPOActor):
                 else:
                     reward = reward * self.scale_reward
                 
+                extracted_understanding = self._extract_understanding_from_tags(sample["response"])
+                if hasattr(self.tokenizer, "encode"):
+                    understanding_len = len(self.tokenizer.encode(extracted_understanding))
+                else:
+                    understanding_len = len(extracted_understanding.split())
+
                 # Apply conciseness penalty only if it exceeds 3/4 of the passage length
-                response_len = len(sample["response_ids"])
-                if response_len > 0.75 * passage_len:
-                    penalty = (response_len / max(passage_len, 1)) * self.conciseness_penalty_k
+                if understanding_len > 0.75 * passage_len:
+                    penalty = (understanding_len / max(passage_len, 1)) * self.conciseness_penalty_k
                     reward -= penalty
                 
                 understanding_rewards[(doc_idx, sample_idx)] = reward
