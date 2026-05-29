@@ -222,3 +222,5 @@ __marimo__/
 wandb/
 data/
 slurm/
+oat-output/
+evaluations/

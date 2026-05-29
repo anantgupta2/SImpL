@@ -29,53 +29,12 @@ except ImportError:
     LoRARequest = None
 
 from src.utils.oat_prompt_templates import (
-    implication_prompt,
-    maybe_apply_chat_template,
+    understanding_prompt,
     qa_cot_prompt,
-    qa_eval_prompt,
+    qa_eval_understanding_with_passage_prompt,
+    understand_and_answer_prompt,
 )
-
-
-def extract_boxed_letter(text: str) -> str:
-    matches = re.findall(r"\\boxed\s*\{\s*([A-Da-d])\s*\}", text or "")
-    if matches:
-        return matches[-1].upper()
-
-    tail = text[-128:] if text else ""
-    plain = re.findall(r"\b([A-Da-d])\b", tail)
-    if plain:
-        return plain[-1].upper()
-    return ""
-
-
-def normalize_gold_letter(value: Any) -> str:
-    if value is None:
-        return ""
-    v = str(value).strip().upper()
-    if len(v) == 1 and v in string.ascii_uppercase[:4]:
-        return v
-    return ""
-
-
-def parse_questions(reference_obj: Any) -> List[Dict[str, Any]]:
-    if isinstance(reference_obj, list):
-        return [q for q in reference_obj if isinstance(q, dict)]
-
-    if isinstance(reference_obj, dict) and isinstance(reference_obj.get("questions"), list):
-        return [q for q in reference_obj["questions"] if isinstance(q, dict)]
-
-    if isinstance(reference_obj, str):
-        try:
-            parsed = json.loads(reference_obj)
-        except json.JSONDecodeError:
-            return []
-
-        if isinstance(parsed, list):
-            return [q for q in parsed if isinstance(q, dict)]
-        if isinstance(parsed, dict) and isinstance(parsed.get("questions"), list):
-            return [q for q in parsed["questions"] if isinstance(q, dict)]
-
-    return []
+from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
 
 
 @dataclass
@@ -115,6 +74,7 @@ class CheckpointEvalResult:
     num_articles: int
     cot_only: EvalResult
     implications_plus_cot: EvalResult
+    u_and_a: EvalResult
 
 
 @dataclass
@@ -127,8 +87,10 @@ class QuestionEvalTrace:
     implication_output: str
     cot_output: str
     imp_plus_cot_output: str
+    u_and_a_output: str
     cot_prediction: str
     imp_plus_cot_prediction: str
+    u_and_a_prediction: str
 
 
 @dataclass(frozen=True)
@@ -136,6 +98,13 @@ class LoRAAdapterInfo:
     has_adapter: bool
     adapter_path: Optional[Path]
     base_model_name_or_path: Optional[str]
+
+
+def _extract_understanding_from_tags(text: str) -> str:
+    match = re.search(r"<understanding>\s*(.*?)\s*</understanding>", text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
 
 
 def load_lora_adapter_info(checkpoint_dir: Path) -> LoRAAdapterInfo:
@@ -231,7 +200,7 @@ def load_eval_examples(
         for q in raw_questions:
             question_text = q.get("question", "")
             options = q.get("options", [])
-            answer = normalize_gold_letter(q.get("answer", ""))
+            answer = normalize_gold_letter(q.get("answer", ""), len(options) if isinstance(options, list) else 4)
             if not isinstance(question_text, str) or not question_text.strip():
                 continue
             if not isinstance(options, list) or len(options) < 4:
@@ -465,6 +434,7 @@ class CheckpointEvaluator:
         reasoning_max_tokens: int,
         answer_max_tokens: int,
         trust_remote_code: bool,
+        system_prompt: str = "You are a helpful assistant.",
     ) -> None:
         self.checkpoint_dir = checkpoint_dir
         self.lora_info = lora_info
@@ -474,6 +444,7 @@ class CheckpointEvaluator:
         self.reasoning_max_items = int(reasoning_max_items)
         self.reasoning_max_tokens = int(reasoning_max_tokens)
         self.answer_max_tokens = int(answer_max_tokens)
+        self.system_prompt = system_prompt
 
         patch_vllm_lru_cache_touch_for_cachetools_compat()
 
@@ -509,6 +480,23 @@ class CheckpointEvaluator:
             else None
         )
 
+    def _apply_template(self, prompt_text: str) -> str:
+        if not self.is_instruct:
+            return prompt_text
+
+        if hasattr(self.tokenizer, "apply_chat_template") and getattr(self.tokenizer, "chat_template", None) is not None:
+            messages = []
+            if getattr(self, "system_prompt", None):
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": prompt_text})
+            
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        return prompt_text
+
     def _generate(
         self,
         prompts: List[str],
@@ -526,34 +514,26 @@ class CheckpointEvaluator:
         )
 
         all_texts: List[str] = []
-        for start in range(0, len(prompts), self.batch_size):
-            batch = prompts[start : start + self.batch_size]
-            outputs = self.llm.generate(
-                batch,
+        outputs = self.llm.generate(
+                prompts,
                 sampling_params,
                 lora_request=self.lora_request,
             )
-            all_texts.extend(_extract_text_outputs(outputs))
+        all_texts = _extract_text_outputs(outputs)
         return all_texts
 
-    def _score_predictions(self, predictions: List[str], answers: List[str]) -> Tuple[int, int]:
+    def _score_predictions(self, predictions: List[str], answers: List[str], options_list: List[List[str]]) -> Tuple[int, int]:
         correct = 0
         total = min(len(predictions), len(answers))
-        for pred_text, gold in zip(predictions, answers):
-            pred = extract_boxed_letter(pred_text)
+        for pred_text, gold, opts in zip(predictions, answers, options_list):
+            pred = extract_boxed_letter(pred_text, len(opts))
             correct += int(pred == gold)
         return correct, total
 
-    def evaluate(self, examples: List[EvalExample]) -> Tuple[EvalResult, EvalResult, List[QuestionEvalTrace]]:
+    def evaluate(self, examples: List[EvalExample]) -> Tuple[EvalResult, EvalResult, EvalResult, List[QuestionEvalTrace]]:
         implication_prompts: List[str] = []
         for ex in examples:
-            implication_prompts.append(
-                maybe_apply_chat_template(
-                    self.tokenizer,
-                    implication_prompt(ex.article, self.reasoning_max_items),
-                    self.is_instruct,
-                )
-            )
+            implication_prompts.append(self._apply_template(understanding_prompt(ex.article)))
         implications = self._generate(
             implication_prompts,
             max_tokens=self.reasoning_max_tokens,
@@ -563,24 +543,19 @@ class CheckpointEvaluator:
 
         cot_prompts: List[str] = []
         imp_plus_cot_prompts: List[str] = []
+        u_and_a_prompts: List[str] = []
         answers: List[str] = []
         question_meta: List[Tuple[str, int, str, List[str], str, str]] = []
 
         for ex, imp in zip(examples, implications):
+            extracted_imp = _extract_understanding_from_tags(imp)
             for q_idx, q in enumerate(ex.questions):
-                cot_prompts.append(
-                    maybe_apply_chat_template(
-                        self.tokenizer,
-                        qa_cot_prompt(ex.article, q.question, q.options),
-                        self.is_instruct,
-                    )
-                )
+                cot_prompts.append(self._apply_template(qa_cot_prompt(ex.article, q.question, q.options)))
                 imp_plus_cot_prompts.append(
-                    maybe_apply_chat_template(
-                        self.tokenizer,
-                        qa_eval_prompt(ex.article, imp, q.question, q.options),
-                        self.is_instruct,
-                    )
+                    self._apply_template(qa_eval_understanding_with_passage_prompt(ex.article, extracted_imp, q.question, q.options))
+                )
+                u_and_a_prompts.append(
+                    self._apply_template(understand_and_answer_prompt(ex.article, q.question, q.options))
                 )
                 answers.append(q.answer)
                 question_meta.append(
@@ -596,14 +571,18 @@ class CheckpointEvaluator:
 
         cot_outputs = self._generate(cot_prompts, max_tokens=self.answer_max_tokens)
         imp_outputs = self._generate(imp_plus_cot_prompts, max_tokens=self.answer_max_tokens)
+        u_and_a_outputs = self._generate(u_and_a_prompts, max_tokens=self.answer_max_tokens)
 
-        cot_correct, cot_total = self._score_predictions(cot_outputs, answers)
-        imp_correct, imp_total = self._score_predictions(imp_outputs, answers)
+        options_list = [t[3] for t in question_meta]
+        cot_correct, cot_total = self._score_predictions(cot_outputs, answers, options_list)
+        imp_correct, imp_total = self._score_predictions(imp_outputs, answers, options_list)
+        u_and_a_correct, u_and_a_total = self._score_predictions(u_and_a_outputs, answers, options_list)
 
         traces: List[QuestionEvalTrace] = []
         for i, (example_id, q_idx, question, options, gold, implication_text) in enumerate(question_meta):
             cot_text = cot_outputs[i] if i < len(cot_outputs) else ""
             imp_text = imp_outputs[i] if i < len(imp_outputs) else ""
+            una_text = u_and_a_outputs[i] if i < len(u_and_a_outputs) else ""
             traces.append(
                 QuestionEvalTrace(
                     example_id=example_id,
@@ -614,8 +593,10 @@ class CheckpointEvaluator:
                     implication_output=implication_text,
                     cot_output=cot_text,
                     imp_plus_cot_output=imp_text,
-                    cot_prediction=extract_boxed_letter(cot_text),
-                    imp_plus_cot_prediction=extract_boxed_letter(imp_text),
+                    u_and_a_output=una_text,
+                    cot_prediction=extract_boxed_letter(cot_text, len(options)),
+                    imp_plus_cot_prediction=extract_boxed_letter(imp_text, len(options)),
+                    u_and_a_prediction=extract_boxed_letter(una_text, len(options)),
                 )
             )
 
@@ -625,6 +606,11 @@ class CheckpointEvaluator:
                 mode="implications_plus_cot",
                 total_questions=imp_total,
                 correct=imp_correct,
+            ),
+            EvalResult(
+                mode="understand_and_answer",
+                total_questions=u_and_a_total,
+                correct=u_and_a_correct,
             ),
             traces,
         )
@@ -653,8 +639,23 @@ def _sample_question_traces(
 
 
 def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalResult], List[Dict[str, Any]]]:
+    import glob
+    
+    data_path = args.data_path
+    if not data_path and args.dataset_name:
+        dataset_dir = Path("data") / args.dataset_name
+        test_files = list(dataset_dir.glob("test*.json*"))
+        if len(test_files) == 1:
+            data_path = str(test_files[0])
+        elif len(test_files) > 1:
+            raise ValueError(f"Found multiple test files in {dataset_dir}: {test_files}")
+        else:
+            raise ValueError(f"No test*.json or test*.jsonl found in {dataset_dir}")
+    elif not data_path:
+        raise ValueError("Must provide either --data_path or --dataset_name")
+
     examples = load_eval_examples(
-        data_path=args.data_path,
+        data_path=data_path,
         split=args.split,
         input_key=args.input_key,
         output_key=args.output_key,
@@ -723,9 +724,10 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                 reasoning_max_tokens=args.reasoning_max_tokens,
                 answer_max_tokens=args.answer_max_tokens,
                 trust_remote_code=args.trust_remote_code,
+                system_prompt=args.system_prompt,
             )
 
-            cot_result, imp_result, traces = evaluator.evaluate(examples)
+            cot_result, imp_result, u_and_a_result, traces = evaluator.evaluate(examples)
             run_name, step = _run_name_and_step(ckpt)
 
             row = CheckpointEvalResult(
@@ -737,6 +739,7 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                 num_articles=len(examples),
                 cot_only=cot_result,
                 implications_plus_cot=imp_result,
+                u_and_a=u_and_a_result,
             )
             results.append(row)
 
@@ -744,7 +747,8 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                 "[eval] "
                 f"run={run_name} step={step} "
                 f"cot_acc={cot_result.accuracy:.4f} ({cot_result.correct}/{cot_result.total_questions}) "
-                f"imp_plus_cot_acc={imp_result.accuracy:.4f} ({imp_result.correct}/{imp_result.total_questions})"
+                f"imp_plus_cot_acc={imp_result.accuracy:.4f} ({imp_result.correct}/{imp_result.total_questions}) "
+                f"u_and_a_acc={u_and_a_result.accuracy:.4f} ({u_and_a_result.correct}/{u_and_a_result.total_questions})"
             )
 
             sampled = _sample_question_traces(
@@ -773,6 +777,9 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                         "imp_plus_cot_output": tr.imp_plus_cot_output,
                         "imp_plus_cot_prediction": tr.imp_plus_cot_prediction,
                         "imp_plus_cot_correct": int(tr.imp_plus_cot_prediction == tr.gold_answer),
+                        "u_and_a_output": tr.u_and_a_output,
+                        "u_and_a_prediction": tr.u_and_a_prediction,
+                        "u_and_a_correct": int(tr.u_and_a_prediction == tr.gold_answer),
                     }
                 )
         finally:
@@ -802,47 +809,100 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
 
 def write_summary(results: List[CheckpointEvalResult], output_csv: Path) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = output_csv.exists()
+    
+    # Read existing lines if file exists
+    existing_lines = []
+    if file_exists:
+        with output_csv.open("r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            existing_lines = list(reader)
+
     with output_csv.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            [
-                "run_name",
-                "step",
-                "checkpoint_path",
-                "base_model",
-                "is_instruct",
-                "num_articles",
-                "cot_correct",
-                "cot_total",
-                "cot_accuracy",
-                "imp_plus_cot_correct",
-                "imp_plus_cot_total",
-                "imp_plus_cot_accuracy",
-            ]
-        )
+        
+        # Write updated header
+        headers = [
+            "cot_accuracy",
+            "cot_correct",
+            "imp_plus_cot_accuracy",
+            "imp_plus_cot_correct",
+            "u_and_a_accuracy",
+            "u_and_a_correct",
+            "total_questions",
+            "is_instruct",
+            "run_name",
+            "step",
+            "checkpoint_path",
+            "base_model",
+            "num_articles",
+        ]
+        writer.writerow(headers)
+        
+        # Re-write existing rows safely using header mapping
+        if existing_lines and len(existing_lines) > 0:
+            old_header = existing_lines[0]
+            for row in existing_lines[1:]:
+                row_dict = {old_header[i]: row[i] if i < len(row) else "" for i in range(len(old_header))}
+                
+                # Resolve single 'total_questions' from older format's cot_total
+                tot = row_dict.get("cot_total", row_dict.get("total_questions", ""))
+                
+                writer.writerow(
+                    [
+                        row_dict.get("cot_accuracy", ""),
+                        row_dict.get("cot_correct", ""),
+                        row_dict.get("imp_plus_cot_accuracy", ""),
+                        row_dict.get("imp_plus_cot_correct", ""),
+                        row_dict.get("u_and_a_accuracy", ""),
+                        row_dict.get("u_and_a_correct", ""),
+                        tot,
+                        row_dict.get("is_instruct", ""),
+                        row_dict.get("run_name", ""),
+                        row_dict.get("step", ""),
+                        row_dict.get("checkpoint_path", ""),
+                        row_dict.get("base_model", ""),
+                        row_dict.get("num_articles", ""),
+                    ]
+                )
+                 
         for r in results:
             writer.writerow(
                 [
+                    f"{r.cot_only.accuracy:.6f}",
+                    r.cot_only.correct,
+                    f"{r.implications_plus_cot.accuracy:.6f}",
+                    r.implications_plus_cot.correct,
+                    f"{r.u_and_a.accuracy:.6f}",
+                    r.u_and_a.correct,
+                    r.cot_only.total_questions,
+                    int(r.is_instruct),
                     r.run_name,
                     r.step,
                     r.checkpoint_path,
                     r.base_model,
-                    int(r.is_instruct),
                     r.num_articles,
-                    r.cot_only.correct,
-                    r.cot_only.total_questions,
-                    f"{r.cot_only.accuracy:.6f}",
-                    r.implications_plus_cot.correct,
-                    r.implications_plus_cot.total_questions,
-                    f"{r.implications_plus_cot.accuracy:.6f}",
                 ]
             )
 
 
 def write_sample_outputs(samples: List[Dict[str, Any]], output_json: Path) -> None:
     output_json.parent.mkdir(parents=True, exist_ok=True)
+    existing_samples = []
+    if output_json.exists():
+        try:
+            with output_json.open("r", encoding="utf-8") as f:
+                existing_samples = json.load(f)
+        except Exception:
+            pass
+            
+    if isinstance(existing_samples, list):
+        existing_samples.extend(samples)
+    else:
+        existing_samples = samples
+        
     with output_json.open("w", encoding="utf-8") as f:
-        json.dump(samples, f, ensure_ascii=False, indent=2)
+        json.dump(existing_samples, f, ensure_ascii=False, indent=2)
 
 
 def parse_args() -> argparse.Namespace:
@@ -854,8 +914,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data_path",
-        default="data/race_test_high_42_1000.jsonl",
+        default=None,
         help="Eval data path (.json/.jsonl) or HF dataset name",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        default=None,
+        help="Dataset name to find test*.json or test*.jsonl in data/{dataset_name}/",
     )
     parser.add_argument("--split", default="train", help="Dataset split when using HF dataset name")
     parser.add_argument("--input_key", default="article")
@@ -893,6 +958,11 @@ def parse_args() -> argparse.Namespace:
         dest="delete_merged_model_after_eval",
         action="store_false",
         help="Keep merged model directories on disk after eval.",
+    )
+    parser.add_argument(
+        "--system_prompt",
+        default="You are a helpful assistant.",
+        help="System prompt for the chat template.",
     )
 
     parser.set_defaults(

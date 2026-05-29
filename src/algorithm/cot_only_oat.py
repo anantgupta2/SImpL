@@ -25,51 +25,7 @@ from oat.utils.ops import masked_mean, masked_sum
 from src.utils.oat_prompt_templates import maybe_apply_chat_template, qa_cot_prompt
 
 
-def extract_boxed_letter(text: str) -> str:
-    """Extract the final boxed letter (A-D) from the model's output text.
-    The function first looks for the last occurrence of a boxed letter in the entire text.
-    If none is found, it looks for the last standalone letter A-D in the last 128 characters of the text.
-    If still none is found, it returns an empty string."""
-    matches = re.findall(r"\\boxed\s*\{\s*([A-Da-d])\s*\}", text or "")
-    if matches:
-        return matches[-1].upper()
-
-    tail = text[-128:] if text else ""
-    plain = re.findall(r"\b([A-Da-d])\b", tail)
-    if plain:
-        return plain[-1].upper()
-    return ""
-
-
-def normalize_gold_letter(value: str) -> str:
-    if not value:
-        return ""
-    v = str(value).strip().upper()
-    if len(v) == 1 and v in string.ascii_uppercase[:4]:
-        return v
-    return ""
-
-
-def parse_questions(reference_obj) -> List[Dict]:
-    if isinstance(reference_obj, list):
-        return [q for q in reference_obj if isinstance(q, dict)]
-
-    if isinstance(reference_obj, dict) and isinstance(reference_obj.get("questions"), list):
-        return [q for q in reference_obj["questions"] if isinstance(q, dict)]
-
-    if isinstance(reference_obj, str):
-        try:
-            parsed = json.loads(reference_obj)
-        except json.JSONDecodeError:
-            return []
-
-        if isinstance(parsed, list):
-            return [q for q in parsed if isinstance(q, dict)]
-        if isinstance(parsed, dict) and isinstance(parsed.get("questions"), list):
-            return [q for q in parsed["questions"] if isinstance(q, dict)]
-
-    return []
-
+from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
 
 def collate_prompt_batch(batch):
     processed_prompts = [item[0] for item in batch]
@@ -86,8 +42,8 @@ class CoTOnlyArgs(PPOArgs):
     train_split: str = "train"
     max_train: int = 999999
 
-    qa_num_samples: int = 8
-    qa_max_tokens: int = 512
+    reasoning_num_samples: int = 8
+    reasoning_max_tokens: int = 512
 
     incorrect_reward: float = 0.0
     correct_reward: float = 1.0
@@ -105,8 +61,8 @@ class CoTOnlyArgs(PPOArgs):
 
 
 def configure_cot_only_args(args: CoTOnlyArgs) -> CoTOnlyArgs:
-    if int(args.qa_num_samples) < 1:
-        raise ValueError("qa_num_samples must be >= 1")
+    if int(args.reasoning_num_samples) < 1:
+        raise ValueError("reasoning_num_samples must be >= 1")
 
     args.algo = "PPO"
     args.oracle = ""
@@ -116,9 +72,11 @@ def configure_cot_only_args(args: CoTOnlyArgs) -> CoTOnlyArgs:
     args.apply_chat_template = False
     args.online_evaluation = True
     args.eval_steps = -1
-    args.beta = 0.0
+    args.beta = 0.04
+    if 'qwen' in args.pretrain.lower():
+        args.use_fused_lm_head = False
 
-    args.num_samples = int(args.qa_num_samples)
+    args.num_samples = int(args.reasoning_num_samples)
     minimum_buffer = int(args.rollout_batch_size_per_device) * int(args.num_samples)
     if args.pi_buffer_maxlen_per_device < minimum_buffer:
         args.pi_buffer_maxlen_per_device = minimum_buffer
@@ -128,8 +86,8 @@ def configure_cot_only_args(args: CoTOnlyArgs) -> CoTOnlyArgs:
 class CoTOnlyActor(PPOActor):
     def init(self, actor_id, save_path):
         super().init(actor_id, save_path)
-        self.qa_num_samples = int(self.args.qa_num_samples)
-        self.qa_max_tokens = int(self.args.qa_max_tokens)
+        self.reasoning_num_samples = int(self.args.reasoning_num_samples)
+        self.reasoning_max_samples = int(self.args.reasoning_max_tokens)
         self.correct_reward = float(self.args.correct_reward)
         self.incorrect_reward = float(self.args.incorrect_reward)
         self.is_instruct = bool(getattr(self.args, "is_instruct", False))
@@ -198,8 +156,8 @@ class CoTOnlyActor(PPOActor):
         for q in questions:
             q_text = q.get("question", "")
             opts = q.get("options", [])
-            gold = normalize_gold_letter(q.get("answer", ""))
-            if isinstance(opts, list) and len(opts) >= 4 and q_text and gold:
+            gold = normalize_gold_letter(q.get("answer", ""), len(opts) if isinstance(opts, list) else 4)
+            if isinstance(opts, list) and len(opts) >= 2 and q_text and gold:
                 valid.append({"question": q_text, "options": opts, "answer": gold})
 
         if not valid:
@@ -228,38 +186,29 @@ class CoTOnlyActor(PPOActor):
             doc_questions = parse_questions(references[doc_idx])
             train_q = self._train_question_for_doc(doc_questions)
 
-            if train_q is None:
-                for _ in range(self.qa_num_samples):
-                    qa_prompts.append(
-                        maybe_apply_chat_template(
-                            self.tokenizer,
-                            "Question: N/A\nAnswer with \\boxed{A}.",
-                            self.is_instruct,
-                        )
-                    )
-                    qa_meta.append((doc_idx, "", True))
-                continue
-
             prompt_text = qa_cot_prompt(
                 article=article,
                 question_text=train_q["question"],
                 options=train_q["options"],
             )
-            for _ in range(self.qa_num_samples):
-                qa_prompts.append(
-                    maybe_apply_chat_template(
-                        self.tokenizer,
-                        prompt_text,
-                        self.is_instruct,
+            for _ in range(self.reasoning_num_samples):
+                if self.is_instruct and hasattr(self.tokenizer, "apply_chat_template"):
+                    prompt_str = self.tokenizer.apply_chat_template(
+                        [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": prompt_text}],
+                        tokenize=False,
+                        add_generation_prompt=True
                     )
-                )
-                qa_meta.append((doc_idx, train_q["answer"], False))
+                else:
+                    prompt_str = prompt_text
+                    
+                qa_prompts.append(prompt_str)
+                qa_meta.append((doc_idx, train_q["answer"], False, len(train_q["options"])))
 
         qa_outputs = self.generate(
             qa_prompts,
             self._build_sampling_params(
                 temperature=self.sampling_params.temperature,
-                max_tokens=self.qa_max_tokens,
+                max_tokens=self.reasoning_max_samples,
                 with_logprobs=True,
             ),
         )
@@ -269,15 +218,20 @@ class CoTOnlyActor(PPOActor):
         correct_count = 0
         trajectory_data: List[TransitionData] = []
         for out, meta, prompt_text in zip(qa_outputs, qa_meta, qa_prompts):
-            doc_idx, gold, is_placeholder = meta
+            doc_idx, gold, is_placeholder, num_opt = meta
             prompt_ids, text, token_ids, logprobs, is_truncated = self._extract_output(out)
 
             if is_placeholder:
                 reward = 0.0
                 loss_mask = False
             else:
-                pred = extract_boxed_letter(text)
-                reward = self.correct_reward if pred == gold else self.incorrect_reward
+                pred = extract_boxed_letter(text, num_opt)
+                if pred == gold:
+                    reward = self.correct_reward
+                elif pred in [chr(ord('A') + i) for i in range(num_opt)]:
+                    reward = 0.1
+                else:
+                    reward = self.incorrect_reward
                 loss_mask = True
                 valid_count += 1
                 correct_count += int(pred == gold)
@@ -288,7 +242,7 @@ class CoTOnlyActor(PPOActor):
             all_rewards.append(float(reward))
             info = {
                 "actor/num_documents": float(len(prompts)),
-                "actor/qa_samples": float(self.qa_num_samples),
+                "actor/qa_samples": float(self.reasoning_num_samples),
                 "actor/qa_reward_mean": float(np.mean(all_rewards)) if all_rewards else 0.0,
                 "actor/qa_accuracy": float(correct_count / max(valid_count, 1)),
                 "actor/step_time": float(time.time() - t0),
@@ -307,13 +261,13 @@ class CoTOnlyActor(PPOActor):
                 )
             )
 
-        expected = len(prompts) * self.qa_num_samples
+        expected = len(prompts) * self.reasoning_num_samples
         assert len(trajectory_data) == expected
         logging.info(
             "CoT-only actor done: docs=%d transitions=%d per_doc=%d",
             len(prompts),
             len(trajectory_data),
-            self.qa_num_samples,
+            self.reasoning_num_samples,
         )
         return self.ipc_client.serialize_ipc(trajectory_data)
 
@@ -324,14 +278,14 @@ class CoTOnlyLearner(PPOLearner):
         self.args = args
         self.args.max_queries = np.inf
         self.masked_aggregator = (
-            functools.partial(masked_sum, constant_normalizer=args.generate_max_length)
+            functools.partial(masked_sum, constant_normalizer=args.reasoning_max_tokens)
             if args.critic_type == "drgrpo"
             else masked_mean
         )
         if args.critic_type in ["grpo", "ppo"] and args.remove_len_bias:
             self.masked_aggregator = functools.partial(
                 masked_sum,
-                constant_normalizer=args.generate_max_length,
+                constant_normalizer=args.reasoning_max_tokens,
             )
 
     def compute_monte_carlo_advantages(self, rewards, response_masks):
@@ -340,7 +294,7 @@ class CoTOnlyLearner(PPOLearner):
         values = rewards.view(-1, self.args.num_samples).mean(dim=1)
         values = values.repeat_interleave(self.args.num_samples, dim=0)
         advantages = rewards - values
-        if (self.args.critic_type == "grpo") and (not self.args.remove_std_bias):
+        if (self.args.critic_type in ["grpo", "drgrpo"]) and (not self.args.remove_std_bias):
             std_grouped_rewards = rewards.view(-1, self.args.num_samples).std(dim=1)
             std_grouped_rewards = std_grouped_rewards.repeat_interleave(
                 self.args.num_samples,
@@ -365,15 +319,38 @@ class CoTOnlyLearner(PPOLearner):
         else:
             train_dataset = data_obj
 
-        max_train = min(int(self.args.max_train), len(train_dataset))
-        train_dataset = train_dataset.select(range(max_train))
-
         input_key = self.args.input_key
         if input_key not in train_dataset.column_names:
             input_key = "article"
         output_key = self.args.output_key
         if output_key not in train_dataset.column_names:
             output_key = "questions"
+
+        def flatten_questions(batch):
+            new_articles = []
+            new_questions = []
+            for article, qs_json in zip(batch[input_key], batch[output_key]):
+                qs = parse_questions(qs_json)
+                for q in qs:
+                    q_text = q.get("question", "")
+                    opts = q.get("options", [])
+                    gold = normalize_gold_letter(q.get("answer", ""), len(opts) if isinstance(opts, list) else 4)
+                    if isinstance(opts, list) and len(opts) >= 2 and q_text and gold:
+                        new_articles.append(article)
+                        # Store as a JSON string to prevent Hugging Face datasets from mangling the types
+                        new_questions.append(json.dumps([{"question": q_text, "options": opts, "answer": gold}]))
+            return {input_key: new_articles, output_key: new_questions}
+
+        train_dataset = train_dataset.map(
+            flatten_questions,
+            batched=True,
+            remove_columns=train_dataset.column_names
+        )
+
+        train_dataset = train_dataset.shuffle(seed=42)
+
+        max_train = min(int(self.args.max_train), len(train_dataset))
+        train_dataset = train_dataset.select(range(max_train))
 
         train_dataset = train_dataset.select_columns([input_key, output_key])
 

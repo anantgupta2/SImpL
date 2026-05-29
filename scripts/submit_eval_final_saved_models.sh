@@ -1,11 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-cd ~/scratch/CS8803LLM_Self_Learning_Project/reasoning
+cd ~/scratch/SImpL
 
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-oat-output/simpl}"
-DATA_PATH="${DATA_PATH:-data/race_test_high_42_1000.jsonl}"
-OUTPUT_DIR="${OUTPUT_DIR:-oat-output/eval/final_only}"
+DATASET_NAME="${DATASET_NAME:-race-c}"
+DATA_PATH="${DATA_PATH:-}"
+OUTPUT_DIR="${OUTPUT_DIR:-evaluations/${DATASET_NAME}/final_only}"
 SCRIPT_PATH="${SCRIPT_PATH:-scripts/run_eval_final_saved_model.sh}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -29,7 +30,8 @@ fi
 
 submitted=0
 for run_dir in "${RUN_DIRS[@]}"; do
-    if ! compgen -G "$run_dir/saved_models/step_*" > /dev/null; then
+    if ! compgen -G "$run_dir/saved_models/step_*" > /dev/null \
+        && ! compgen -G "$run_dir/checkpoint-*" > /dev/null; then
         echo "[skip] No checkpoints in $(basename "$run_dir")"
         continue
     fi
@@ -48,9 +50,10 @@ for run_dir in "${RUN_DIRS[@]}"; do
 
     echo "[queue] $run_name"
     if [[ "$DRY_RUN" == "1" ]]; then
-        echo "        RUN_DIR=$run_dir DATA_PATH=$DATA_PATH OUTPUT_DIR=$OUTPUT_DIR ${sbatch_cmd[*]}"
+        echo "        RUN_DIR=$run_dir DATASET_NAME=$DATASET_NAME DATA_PATH=$DATA_PATH OUTPUT_DIR=$OUTPUT_DIR ${sbatch_cmd[*]}"
     else
         RUN_DIR="$run_dir" \
+        DATASET_NAME="$DATASET_NAME" \
         DATA_PATH="$DATA_PATH" \
         OUTPUT_DIR="$OUTPUT_DIR" \
         "${sbatch_cmd[@]}"

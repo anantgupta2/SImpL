@@ -25,6 +25,8 @@ from oat.utils.ops import masked_mean, masked_sum
 from src.utils.oat_prompt_templates import understanding_prompt, maybe_apply_chat_template, qa_cot_prompt, qa_eval_understanding_only_prompt
 from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
 
+from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
+
 
 def collate_prompt_batch(batch):
     processed_prompts = [item[0] for item in batch]
@@ -34,7 +36,7 @@ def collate_prompt_batch(batch):
 
 
 @dataclass
-class UnderstandingOnlyArgs(PPOArgs):
+class CoTAndUnderstandingArgs(PPOArgs):
     prompt_data: str = ""
     input_key: str = "article"
     output_key: str = "questions"
@@ -64,7 +66,7 @@ class UnderstandingOnlyArgs(PPOArgs):
     beta: float = 0.0
 
 
-def configure_understandings_only_args(args: UnderstandingOnlyArgs) -> UnderstandingOnlyArgs:
+def configure_cot_and_understanding_args(args: CoTAndUnderstandingArgs) -> CoTAndUnderstandingArgs:
     if int(args.reasoning_num_samples) < 1:
         raise ValueError("reasoning_num_samples must be >= 1")
 
@@ -87,7 +89,7 @@ def configure_understandings_only_args(args: UnderstandingOnlyArgs) -> Understan
     return args
 
 
-class UnderstandingOnlyActor(PPOActor):
+class CoTAndUnderstandingActor(PPOActor):
     def init(self, actor_id, save_path):
         super().init(actor_id, save_path)
         self.reasoning_num_samples = int(self.args.reasoning_num_samples)
@@ -163,6 +165,60 @@ class UnderstandingOnlyActor(PPOActor):
     def _extract_text_only(self, output) -> str:
         completion = output.outputs[0]
         return completion.text or ""
+
+    # def _score_document_baseline(
+    #     self,
+    #     article: str,
+    #     questions: List[Dict],
+    # ) -> Tuple[float, int, int]:
+    #     if not questions:
+    #         return 0.0, 0, 0
+
+    #     eval_prompts = []
+    #     golds = []
+    #     num_options_list = []
+    #     for q in questions:
+    #         q_text = q.get("question", "")
+    #         opts = q.get("options", [])
+    #         gold = normalize_gold_letter(q.get("answer", ""), len(opts) if isinstance(opts, list) else 4)
+    #         if not isinstance(opts, list) or len(opts) < 2 or not q_text or not gold:
+    #             continue
+    #         eval_prompts.append(
+    #             maybe_apply_chat_template(
+    #                 self.tokenizer,
+    #                 qa_cot_prompt(article, q_text, opts),
+    #                 self.is_instruct,
+    #             )
+    #         )
+    #         golds.append(gold)
+    #         num_options_list.append(len(opts))
+
+    #     if not eval_prompts:
+    #         return 0.0, 0, 0
+
+    #     eval_outputs = self.generate(
+    #         eval_prompts,
+    #         self._build_sampling_params(
+    #             temperature=self.qa_eval_temperature if self.qa_num_samples > 1 else 0.0,
+    #             max_tokens=self.qa_eval_max_tokens,
+    #             with_logprobs=False,
+    #             n=self.qa_num_samples,
+    #         ),
+    #     )
+
+    #     correct = 0
+    #     for out, gold, num_opt in zip(eval_outputs, golds, num_options_list):
+    #         for completion in out.outputs:
+    #             pred = extract_boxed_letter(completion.text or "", num_opt)
+    #             correct += int(pred == gold)
+
+    #     total = len(golds) * self.qa_num_samples
+    #     if total == 0:
+    #         return 0.0, 0, 0
+
+    #     acc = float(correct) / float(total)
+    #     reward = self.incorrect_reward + (self.correct_reward - self.incorrect_reward) * acc
+    #     return reward, correct, total
 
     def _extract_understanding_from_tags(self, text: str) -> str:
         match = re.search(r"<understanding>\s*(.*?)\s*</understanding>", text, re.DOTALL | re.IGNORECASE)
@@ -245,6 +301,7 @@ class UnderstandingOnlyActor(PPOActor):
 
         return reward, correct, total
 
+
     def step(
         self,
         prompts: List[str],
@@ -260,22 +317,46 @@ class UnderstandingOnlyActor(PPOActor):
         if references is None:
             references = [None] * len(prompts)
 
-        understanding_prompts = []
-        understanding_owner = []
-        for doc_idx, article in enumerate(prompts):
-            prompt_text = understanding_prompt(article)
-            for _ in range(self.reasoning_num_samples):
-                understanding_prompts.append(
-                    maybe_apply_chat_template(
-                        self.tokenizer,
-                        prompt_text,
-                        self.is_instruct,
-                    )
-                )
-                understanding_owner.append(doc_idx)
+        generation_prompts = []
+        generation_meta = []
+        
+        for doc_idx, (article, ref_str) in enumerate(zip(prompts, references)):
+            try:
+                parsed = json.loads(ref_str) if ref_str else {"task_type": "cot", "questions": []}
+            except json.JSONDecodeError:
+                parsed = {"task_type": "cot", "questions": []}
+            
+            task_type = parsed.get("task_type", "cot")
+            valid_questions = parsed.get("questions", [])
+            
+            if task_type == "cot" and valid_questions:
+                q = valid_questions[0]
+                prompt_text = qa_cot_prompt(article, q["question"], q["options"])
+                for sample_idx in range(self.reasoning_num_samples):
+                    prompt_str = maybe_apply_chat_template(self.tokenizer, prompt_text, self.is_instruct)
+                    generation_prompts.append(prompt_str)
+                    generation_meta.append({
+                        "doc_idx": doc_idx,
+                        "task_type": "cot",
+                        "sample_idx": sample_idx,
+                        "gold": q.get("answer", ""),
+                        "num_opt": len(q.get("options", [])),
+                        "valid_questions": valid_questions
+                    })
+            else:
+                prompt_text = understanding_prompt(article)
+                for sample_idx in range(self.reasoning_num_samples):
+                    prompt_str = maybe_apply_chat_template(self.tokenizer, prompt_text, self.is_instruct)
+                    generation_prompts.append(prompt_str)
+                    generation_meta.append({
+                        "doc_idx": doc_idx,
+                        "task_type": "understanding",
+                        "sample_idx": sample_idx,
+                        "valid_questions": valid_questions
+                    })
 
-        imp_outputs = self.generate(
-            understanding_prompts,
+        outputs = self.generate(
+            generation_prompts,
             self._build_sampling_params(
                 temperature=self.sampling_params.temperature,
                 max_tokens=self.reasoning_max_tokens,
@@ -283,91 +364,139 @@ class UnderstandingOnlyActor(PPOActor):
             ),
         )
 
-        understanding_data: List[List[Dict]] = [[] for _ in range(len(prompts))]
-        for out, owner, prompt_text in zip(imp_outputs, understanding_owner, understanding_prompts):
-            prompt_ids, text, token_ids, logprobs, is_truncated = self._extract_output(out)
-            understanding_data[owner].append(
-                {
-                    "prompt": prompt_text,
-                    "prompt_ids": prompt_ids,
-                    "response": text,
-                    "response_ids": token_ids,
-                    "response_logprobs": logprobs,
-                    "is_truncated": is_truncated,
-                }
-            )
-
-        understanding_rewards: Dict[Tuple[int, int], float] = {}
-        valid_doc_flags: Dict[int, bool] = {}
+        trajectory_data: List[TransitionData] = []
+        info_rewards_cot = []
+        info_rewards_und = []
+        correct_count_cot = 0
+        valid_count_cot = 0
         total_eval_q = 0
         total_eval_correct = 0
-
-        for doc_idx, article in enumerate(prompts):
-            questions = parse_questions(references[doc_idx])
-            valid_questions = []
-            for q in questions:
-                q_text = q.get("question", "")
-                opts = q.get("options", [])
-                gold = normalize_gold_letter(q.get("answer", ""), len(opts) if isinstance(opts, list) else 4)
-                if isinstance(opts, list) and len(opts) >= 2 and q_text and gold:
-                    valid_questions.append(q)
-            valid_doc_flags[doc_idx] = len(valid_questions) > 0
-
-            # if self.conciseness_penalty_k > 0.0:
-            #     passage_len = len(self.tokenizer.encode(article)) if hasattr(self.tokenizer, "encode") else len(article.split())
-
-            # if self.use_baseline_reward:
-            #     b_reward, b_correct, b_total = self._score_document_baseline(article, valid_questions)
-            # else:
-            #     b_reward, b_correct, b_total = 0.0, 0, 0
-
-            for sample_idx, sample in enumerate(understanding_data[doc_idx]):
-                reward, n_correct, n_total = self._score_one_understanding(
-                    article=article,
-                    understandings_text=sample["response"],
-                    questions=valid_questions,
-                )
+        
+        eval_prompts = []
+        eval_meta = []
+        
+        extracted_data = []
+        for i, (out, meta) in enumerate(zip(outputs, generation_meta)):
+            prompt_ids, text, token_ids, logprobs, is_truncated = self._extract_output(out)
+            extracted_data.append({
+                "prompt_ids": prompt_ids,
+                "text": text,
+                "token_ids": token_ids,
+                "logprobs": logprobs,
+                "is_truncated": is_truncated
+            })
+            if meta["task_type"] == "understanding" and meta["valid_questions"]:
+                extracted_understanding = self._extract_understanding_from_tags(text)
+                if extracted_understanding:
+                    for q in meta["valid_questions"]:
+                        article_text = prompts[meta["doc_idx"]] if self.use_baseline_reward else ""
+                        q_text = q.get("question", "")
+                        opts = q.get("options", [])
+                        gold = q.get("answer", "")
+                        eval_text = qa_eval_understanding_only_prompt(article_text, extracted_understanding, q_text, opts)
+                        eval_prompts.append(maybe_apply_chat_template(self.tokenizer, eval_text, self.is_instruct))
+                        eval_meta.append({
+                            "parent_idx": i,
+                            "gold": gold,
+                            "num_opt": len(opts)
+                        })
+        
+        eval_results = []
+        if eval_prompts:
+            eval_outputs = self.generate(
+                eval_prompts,
+                self._build_sampling_params(
+                    temperature=self.qa_eval_temperature if self.qa_num_samples > 1 else 0.0,
+                    max_tokens=self.qa_eval_max_tokens,
+                    with_logprobs=False,
+                    n=self.qa_num_samples,
+                ),
+            )
+            for out, e_meta in zip(eval_outputs, eval_meta):
+                for completion in out.outputs:
+                    pred = extract_boxed_letter(completion.text or "", e_meta["num_opt"])
+                    is_correct = int(pred == e_meta["gold"])
+                    num_toks = len(completion.token_ids) if completion.token_ids else 0
+                    eval_results.append({
+                        "parent_idx": e_meta["parent_idx"],
+                        "is_correct": is_correct,
+                        "num_toks": num_toks
+                    })
+                    total_eval_q += 1
+                    total_eval_correct += is_correct
+                    
+        from collections import defaultdict
+        eval_grouped = defaultdict(list)
+        for res in eval_results:
+            eval_grouped[res["parent_idx"]].append(res)
+            
+        for i, (meta, ext_data, prompt_text) in enumerate(zip(generation_meta, extracted_data, generation_prompts)):
+            reward = 0.0
+            loss_mask = False
+            
+            if meta["task_type"] == "cot":
+                pred = extract_boxed_letter(ext_data["text"], meta["num_opt"])
+                gold = meta["gold"]
+                num_opt = meta["num_opt"]
+                if pred == gold:
+                    reward = self.correct_reward
+                elif pred in [chr(ord('A') + k) for k in range(num_opt)]:
+                    reward = 0.1
+                else:
+                    reward = self.incorrect_reward
+                loss_mask = len(meta["valid_questions"]) > 0
+                if loss_mask and not ext_data["is_truncated"]:
+                    valid_count_cot += 1
+                    correct_count_cot += int(pred == gold)
+                info_rewards_cot.append(reward)
+            else:
+                results = eval_grouped[i]
+                if not results and meta["valid_questions"]:
+                    reward = -0.2 * self.scale_reward
+                elif results:
+                    correct = sum(r["is_correct"] for r in results)
+                    total = len(results)
+                    acc = float(correct) / float(total)
+                    base_reward = self.incorrect_reward + (self.correct_reward - self.incorrect_reward) * acc
+                    
+                    if correct > 0:
+                        bonus_sum = sum(self.conciseness_penalty_k * (1.0 - r["num_toks"] / self.qa_eval_max_tokens) for r in results if r["is_correct"])
+                        base_reward += bonus_sum / correct
+                    reward = base_reward * self.scale_reward
+                    
+                loss_mask = len(meta["valid_questions"]) > 0
+                info_rewards_und.append(reward)
                 
-                understanding_rewards[(doc_idx, sample_idx)] = reward * self.scale_reward
-                total_eval_correct += n_correct
-                total_eval_q += n_total
+            if self.args.ignore_no_eos and ext_data["is_truncated"]:
+                loss_mask = False
+                
+            info = {
+                "actor/num_documents": float(len(prompts)),
+                "actor/num_samples": float(self.reasoning_num_samples),
+                "actor/cot_reward_mean": float(np.mean(info_rewards_cot)) if info_rewards_cot else 0.0,
+                "actor/cot_accuracy": float(correct_count_cot / max(valid_count_cot, 1)),
+                "actor/understanding_reward_mean": float(np.mean(info_rewards_und)) if info_rewards_und else 0.0,
+                "actor/eval_question_accuracy": float(total_eval_correct / max(total_eval_q, 1)),
+                "actor/step_time": float(time.time() - t0),
+            }
 
-        all_imp_rewards = list(understanding_rewards.values())
-        info = {
-            "actor/num_documents": float(len(prompts)),
-            "actor/understanding_samples": float(self.reasoning_num_samples),
-            "actor/understanding_reward_mean": float(np.mean(all_imp_rewards)) if all_imp_rewards else 0.0,
-            "actor/understanding_reward_std": float(np.std(all_imp_rewards)) if all_imp_rewards else 0.0,
-            "actor/eval_question_accuracy": float(total_eval_correct / max(total_eval_q, 1)),
-            "actor/step_time": float(time.time() - t0),
-        }
-
-        trajectory_data: List[TransitionData] = []
-        for doc_idx in range(len(prompts)):
-            doc_has_valid_q = valid_doc_flags.get(doc_idx, False)
-            for sample_idx, sample in enumerate(understanding_data[doc_idx]):
-                reward = understanding_rewards.get((doc_idx, sample_idx), 0.0)
-                loss_mask = doc_has_valid_q
-                if self.args.ignore_no_eos and sample["is_truncated"]:
-                    loss_mask = False
-
-                trajectory_data.append(
-                    TransitionData(
-                        prompt=sample["prompt"],
-                        prompt_ids=sample["prompt_ids"],
-                        response=sample["response"],
-                        response_ids=sample["response_ids"],
-                        response_logprobs=sample["response_logprobs"],
-                        rewards=self._terminal_reward(len(sample["response_ids"]), reward),
-                        loss_mask=loss_mask,
-                        info=info,
-                    )
+            trajectory_data.append(
+                TransitionData(
+                    prompt=prompt_text,
+                    prompt_ids=ext_data["prompt_ids"],
+                    response=ext_data["text"],
+                    response_ids=ext_data["token_ids"],
+                    response_logprobs=ext_data["logprobs"],
+                    rewards=self._terminal_reward(len(ext_data["token_ids"]), reward),
+                    loss_mask=loss_mask,
+                    info=info,
                 )
+            )
 
         expected = len(prompts) * self.reasoning_num_samples
         assert len(trajectory_data) == expected
         logging.info(
-            "Understanding-only actor done: docs=%d transitions=%d per_doc=%d",
+            "CoT+Understanding actor done: docs=%d transitions=%d per_doc=%d",
             len(prompts),
             len(trajectory_data),
             self.reasoning_num_samples,
@@ -375,8 +504,8 @@ class UnderstandingOnlyActor(PPOActor):
         return self.ipc_client.serialize_ipc(trajectory_data)
 
 
-class UnderstandingOnlyLearner(PPOLearner):
-    def _init(self, args: UnderstandingOnlyArgs, actors: List[ActorBase]) -> None:
+class CoTAndUnderstandingLearner(PPOLearner):
+    def _init(self, args: CoTAndUnderstandingArgs, actors: List[ActorBase]) -> None:
         super()._init(args, actors)
         self.args = args
         self.args.max_queries = np.inf
@@ -422,9 +551,6 @@ class UnderstandingOnlyLearner(PPOLearner):
         else:
             train_dataset = data_obj
 
-        max_train = min(int(self.args.max_train), len(train_dataset))
-        train_dataset = train_dataset.select(range(max_train))
-
         input_key = self.args.input_key
         if input_key not in train_dataset.column_names:
             input_key = "article"
@@ -432,6 +558,47 @@ class UnderstandingOnlyLearner(PPOLearner):
         if output_key not in train_dataset.column_names:
             output_key = "questions"
 
+        def flatten_and_mix_questions(batch):
+            new_articles = []
+            new_questions = [] # We use this as output_key (references)
+            for article, qs_json in zip(batch[input_key], batch[output_key]):
+                qs = parse_questions(qs_json)
+                valid_qs = []
+                for q in qs:
+                    q_text = q.get("question", "")
+                    opts = q.get("options", [])
+                    gold = normalize_gold_letter(q.get("answer", ""), len(opts) if isinstance(opts, list) else 4)
+                    if isinstance(opts, list) and len(opts) >= 2 and q_text and gold:
+                        valid_qs.append({"question": q_text, "options": opts, "answer": gold})
+                
+                if not valid_qs:
+                    continue
+                
+                # Add 'understanding' task
+                new_articles.append(article)
+                new_questions.append(json.dumps({
+                    "task_type": "understanding",
+                    "questions": valid_qs
+                }))
+                
+                # Add 'cot' task for each question
+                for vq in valid_qs:
+                    new_articles.append(article)
+                    new_questions.append(json.dumps({
+                        "task_type": "cot",
+                        "questions": [vq]
+                    }))
+            return {input_key: new_articles, output_key: new_questions}
+
+        train_dataset = train_dataset.map(
+            flatten_and_mix_questions,
+            batched=True,
+            remove_columns=train_dataset.column_names
+        )
+        
+        train_dataset = train_dataset.shuffle(seed=42)
+        max_train = min(int(self.args.max_train), len(train_dataset))
+        train_dataset = train_dataset.select(range(max_train))
         train_dataset = train_dataset.select_columns([input_key, output_key])
 
         self.prompts_dataset = PromptDataset(
@@ -459,14 +626,14 @@ class UnderstandingOnlyLearner(PPOLearner):
         return {}
 
 
-def run_understandings_only_oat(args: UnderstandingOnlyArgs):
-    args = configure_understandings_only_args(args)
+def run_cot_and_understanding_oat(args: CoTAndUnderstandingArgs):
+    args = configure_cot_and_understanding_args(args)
     args = default_args_validation(args)
 
     program, local_resources = get_program(
         args,
-        learner_cls=UnderstandingOnlyLearner,
-        actor_cls=UnderstandingOnlyActor,
+        learner_cls=CoTAndUnderstandingLearner,
+        actor_cls=CoTAndUnderstandingActor,
     )
     lp.launch(
         program,
@@ -477,5 +644,5 @@ def run_understandings_only_oat(args: UnderstandingOnlyArgs):
 
 
 if __name__ == "__main__":
-    cli_args: UnderstandingOnlyArgs = get_default_args(UnderstandingOnlyArgs)
-    run_understandings_only_oat(cli_args)
+    cli_args: CoTAndUnderstandingArgs = get_default_args(CoTAndUnderstandingArgs)
+    run_cot_and_understanding_oat(cli_args)
