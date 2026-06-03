@@ -31,7 +31,7 @@ except ImportError:
 from src.utils.oat_prompt_templates import (
     understanding_prompt,
     qa_cot_prompt,
-    qa_eval_understanding_with_passage_prompt,
+    qa_eval_understanding_only_prompt,
     understand_and_answer_prompt,
 )
 from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
@@ -73,7 +73,7 @@ class CheckpointEvalResult:
     is_instruct: bool
     num_articles: int
     cot_only: EvalResult
-    implications_plus_cot: EvalResult
+    understanding_plus_cot: EvalResult
     u_and_a: EvalResult
 
 
@@ -84,12 +84,12 @@ class QuestionEvalTrace:
     question: str
     options: List[str]
     gold_answer: str
-    implication_output: str
+    understanding_output: str
     cot_output: str
-    imp_plus_cot_output: str
+    understanding_qa_output: str
     u_and_a_output: str
     cot_prediction: str
-    imp_plus_cot_prediction: str
+    understanding_qa_prediction: str
     u_and_a_prediction: str
 
 
@@ -101,10 +101,16 @@ class LoRAAdapterInfo:
 
 
 def _extract_understanding_from_tags(text: str) -> str:
+    # Mirror the training-time extraction (cot_and_understanding_oat /
+    # understanding_only_oat) exactly so eval scores what was trained.
     match = re.search(r"<understanding>\s*(.*?)\s*</understanding>", text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
-    return text.strip()
+    # No closing tag: extract from the start tag to the end of the text.
+    match2 = re.search(r"<understanding>\s*(.*?)\s*$", text, re.DOTALL | re.IGNORECASE)
+    if match2:
+        return match2.group(1).strip()
+    return ""
 
 
 def load_lora_adapter_info(checkpoint_dir: Path) -> LoRAAdapterInfo:
@@ -203,7 +209,7 @@ def load_eval_examples(
             answer = normalize_gold_letter(q.get("answer", ""), len(options) if isinstance(options, list) else 4)
             if not isinstance(question_text, str) or not question_text.strip():
                 continue
-            if not isinstance(options, list) or len(options) < 4:
+            if not isinstance(options, list) or len(options) < 2:
                 continue
             if not answer:
                 continue
@@ -211,7 +217,7 @@ def load_eval_examples(
             q_list.append(
                 EvalQuestion(
                     question=question_text,
-                    options=[str(o) for o in options[:4]],
+                    options=[str(o) for o in options],
                     answer=answer,
                 )
             )
@@ -435,6 +441,8 @@ class CheckpointEvaluator:
         answer_max_tokens: int,
         trust_remote_code: bool,
         system_prompt: str = "You are a helpful assistant.",
+        dataset_name: str = "race-c",
+        understanding_with_passage: bool = False,
     ) -> None:
         self.checkpoint_dir = checkpoint_dir
         self.lora_info = lora_info
@@ -445,6 +453,11 @@ class CheckpointEvaluator:
         self.reasoning_max_tokens = int(reasoning_max_tokens)
         self.answer_max_tokens = int(answer_max_tokens)
         self.system_prompt = system_prompt
+        self.dataset_name = str(dataset_name)
+        # Must match the training-time `use_baseline_reward` flag: when the
+        # understanding was scored with the passage present during training,
+        # include the passage here too.
+        self.understanding_with_passage = bool(understanding_with_passage)
 
         patch_vllm_lru_cache_touch_for_cachetools_compat()
 
@@ -533,7 +546,9 @@ class CheckpointEvaluator:
     def evaluate(self, examples: List[EvalExample]) -> Tuple[EvalResult, EvalResult, EvalResult, List[QuestionEvalTrace]]:
         implication_prompts: List[str] = []
         for ex in examples:
-            implication_prompts.append(self._apply_template(understanding_prompt(ex.article)))
+            implication_prompts.append(
+                self._apply_template(understanding_prompt(ex.article, self.dataset_name))
+            )
         implications = self._generate(
             implication_prompts,
             max_tokens=self.reasoning_max_tokens,
@@ -549,10 +564,13 @@ class CheckpointEvaluator:
 
         for ex, imp in zip(examples, implications):
             extracted_imp = _extract_understanding_from_tags(imp)
+            # Match training: understanding is scored via qa_eval_understanding_only_prompt,
+            # with the passage included only when training used use_baseline_reward=True.
+            imp_article = ex.article if self.understanding_with_passage else ""
             for q_idx, q in enumerate(ex.questions):
                 cot_prompts.append(self._apply_template(qa_cot_prompt(ex.article, q.question, q.options)))
                 imp_plus_cot_prompts.append(
-                    self._apply_template(qa_eval_understanding_with_passage_prompt(ex.article, extracted_imp, q.question, q.options))
+                    self._apply_template(qa_eval_understanding_only_prompt(imp_article, extracted_imp, q.question, q.options))
                 )
                 u_and_a_prompts.append(
                     self._apply_template(understand_and_answer_prompt(ex.article, q.question, q.options))
@@ -590,12 +608,12 @@ class CheckpointEvaluator:
                     question=question,
                     options=options,
                     gold_answer=gold,
-                    implication_output=implication_text,
+                    understanding_output=implication_text,
                     cot_output=cot_text,
-                    imp_plus_cot_output=imp_text,
+                    understanding_qa_output=imp_text,
                     u_and_a_output=una_text,
                     cot_prediction=extract_boxed_letter(cot_text, len(options)),
-                    imp_plus_cot_prediction=extract_boxed_letter(imp_text, len(options)),
+                    understanding_qa_prediction=extract_boxed_letter(imp_text, len(options)),
                     u_and_a_prediction=extract_boxed_letter(una_text, len(options)),
                 )
             )
@@ -603,7 +621,7 @@ class CheckpointEvaluator:
         return (
             EvalResult(mode="cot_only", total_questions=cot_total, correct=cot_correct),
             EvalResult(
-                mode="implications_plus_cot",
+                mode="understanding_plus_cot",
                 total_questions=imp_total,
                 correct=imp_correct,
             ),
@@ -725,6 +743,8 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                 answer_max_tokens=args.answer_max_tokens,
                 trust_remote_code=args.trust_remote_code,
                 system_prompt=args.system_prompt,
+                dataset_name=(args.dataset_name or "race-c"),
+                understanding_with_passage=args.understanding_with_passage,
             )
 
             cot_result, imp_result, u_and_a_result, traces = evaluator.evaluate(examples)
@@ -738,7 +758,7 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                 is_instruct=is_instruct,
                 num_articles=len(examples),
                 cot_only=cot_result,
-                implications_plus_cot=imp_result,
+                understanding_plus_cot=imp_result,
                 u_and_a=u_and_a_result,
             )
             results.append(row)
@@ -747,7 +767,7 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                 "[eval] "
                 f"run={run_name} step={step} "
                 f"cot_acc={cot_result.accuracy:.4f} ({cot_result.correct}/{cot_result.total_questions}) "
-                f"imp_plus_cot_acc={imp_result.accuracy:.4f} ({imp_result.correct}/{imp_result.total_questions}) "
+                f"understanding_plus_cot_acc={imp_result.accuracy:.4f} ({imp_result.correct}/{imp_result.total_questions}) "
                 f"u_and_a_acc={u_and_a_result.accuracy:.4f} ({u_and_a_result.correct}/{u_and_a_result.total_questions})"
             )
 
@@ -770,13 +790,13 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                         "question": tr.question,
                         "options": tr.options,
                         "gold_answer": tr.gold_answer,
-                        "implication_output": tr.implication_output,
+                        "understanding_output": tr.understanding_output,
                         "cot_output": tr.cot_output,
                         "cot_prediction": tr.cot_prediction,
                         "cot_correct": int(tr.cot_prediction == tr.gold_answer),
-                        "imp_plus_cot_output": tr.imp_plus_cot_output,
-                        "imp_plus_cot_prediction": tr.imp_plus_cot_prediction,
-                        "imp_plus_cot_correct": int(tr.imp_plus_cot_prediction == tr.gold_answer),
+                        "understanding_qa_output": tr.understanding_qa_output,
+                        "understanding_qa_prediction": tr.understanding_qa_prediction,
+                        "understanding_qa_correct": int(tr.understanding_qa_prediction == tr.gold_answer),
                         "u_and_a_output": tr.u_and_a_output,
                         "u_and_a_prediction": tr.u_and_a_prediction,
                         "u_and_a_correct": int(tr.u_and_a_prediction == tr.gold_answer),
@@ -825,8 +845,8 @@ def write_summary(results: List[CheckpointEvalResult], output_csv: Path) -> None
         headers = [
             "cot_accuracy",
             "cot_correct",
-            "imp_plus_cot_accuracy",
-            "imp_plus_cot_correct",
+            "understanding_plus_cot_accuracy",
+            "understanding_plus_cot_correct",
             "u_and_a_accuracy",
             "u_and_a_correct",
             "total_questions",
@@ -847,13 +867,21 @@ def write_summary(results: List[CheckpointEvalResult], output_csv: Path) -> None
                 
                 # Resolve single 'total_questions' from older format's cot_total
                 tot = row_dict.get("cot_total", row_dict.get("total_questions", ""))
-                
+
+                # Support both the new column names and the legacy "imp_plus_cot_*" ones.
+                upc_acc = row_dict.get(
+                    "understanding_plus_cot_accuracy", row_dict.get("imp_plus_cot_accuracy", "")
+                )
+                upc_correct = row_dict.get(
+                    "understanding_plus_cot_correct", row_dict.get("imp_plus_cot_correct", "")
+                )
+
                 writer.writerow(
                     [
                         row_dict.get("cot_accuracy", ""),
                         row_dict.get("cot_correct", ""),
-                        row_dict.get("imp_plus_cot_accuracy", ""),
-                        row_dict.get("imp_plus_cot_correct", ""),
+                        upc_acc,
+                        upc_correct,
                         row_dict.get("u_and_a_accuracy", ""),
                         row_dict.get("u_and_a_correct", ""),
                         tot,
@@ -871,8 +899,8 @@ def write_summary(results: List[CheckpointEvalResult], output_csv: Path) -> None
                 [
                     f"{r.cot_only.accuracy:.6f}",
                     r.cot_only.correct,
-                    f"{r.implications_plus_cot.accuracy:.6f}",
-                    r.implications_plus_cot.correct,
+                    f"{r.understanding_plus_cot.accuracy:.6f}",
+                    r.understanding_plus_cot.correct,
                     f"{r.u_and_a.accuracy:.6f}",
                     r.u_and_a.correct,
                     r.cot_only.total_questions,
@@ -983,6 +1011,24 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--max_articles", type=int, default=None)
     parser.add_argument("--max_questions_per_article", type=int, default=None)
+
+    parser.add_argument(
+        "--understanding_with_passage",
+        dest="understanding_with_passage",
+        action="store_true",
+        default=True,
+        help=(
+            "Include the passage alongside the understanding when scoring the "
+            "understanding_plus_cot mode (default). Match this to the training "
+            "config's use_baseline_reward."
+        ),
+    )
+    parser.add_argument(
+        "--no_understanding_with_passage",
+        dest="understanding_with_passage",
+        action="store_false",
+        help="Score the understanding_plus_cot mode without the passage (understanding only).",
+    )
 
     parser.add_argument(
         "--is_instruct",

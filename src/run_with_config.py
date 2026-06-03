@@ -3,13 +3,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
+import numpy as np
+import torch
 from typing import Any, Callable
 
 from src.utils.preprocess_data import create_or_load_preprocessed_data
-# from src.algorithm.SImpL_oat import SImpLArgs, run_simpl_oat
+from src.algorithm.SImpL_oat import SImpLArgs, run_simpl_oat
 from src.algorithm.cot_only_oat import CoTOnlyArgs, run_cot_only_oat
-# from src.algorithm.implications_only_oat import ImplicationsOnlyArgs, run_implications_only_oat
+from src.algorithm.cot_and_understanding_oat import CoTAndUnderstandingArgs, run_cot_and_understanding_oat
 from src.algorithm.understanding_only_oat import UnderstandingOnlyArgs, run_understandings_only_oat
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _load_config(path: str) -> dict[str, Any]:
@@ -24,29 +35,30 @@ def _sanitize_oat_args(
     oat_args: dict[str, Any],
     *,
     cot_only: bool,
-    implications_only: bool,
+    combined: bool,
     understanding_only: bool,
+    simpl: bool,
 ) -> tuple[dict[str, Any], str, Callable[[Any], None], str]:
     if cot_only:
         valid_fields = set(CoTOnlyArgs.__dataclass_fields__.keys())
         args_cls_name = "CoTOnlyArgs"
         run_fn = run_cot_only_oat
         run_name = "CoT-only"
-    # elif implications_only:
-    #     valid_fields = set(ImplicationsOnlyArgs.__dataclass_fields__.keys())
-    #     args_cls_name = "ImplicationsOnlyArgs"
-    #     run_fn = run_implications_only_oat
-    #     run_name = "Implications-only"
+    elif simpl:
+        valid_fields = set(SImpLArgs.__dataclass_fields__.keys())
+        args_cls_name = "SImpLArgs"
+        run_fn = run_simpl_oat
+        run_name = "SImpL"
+    elif combined:
+        valid_fields = set(CoTAndUnderstandingArgs.__dataclass_fields__.keys())
+        args_cls_name = "CoTAndUnderstandingArgs"
+        run_fn = run_cot_and_understanding_oat
+        run_name = "Combined"
     elif understanding_only:
         valid_fields = set(UnderstandingOnlyArgs.__dataclass_fields__.keys())
         args_cls_name = "UnderstandingOnlyArgs"
         run_fn = run_understandings_only_oat
         run_name = "Understanding-only"
-    # else:
-    #     valid_fields = set(SImpLArgs.__dataclass_fields__.keys())
-    #     args_cls_name = "SImpLArgs"
-    #     run_fn = run_simpl_oat
-    #     run_name = "SImpL"
     filtered = {k: v for k, v in oat_args.items() if k in valid_fields}
     dropped = sorted([k for k in oat_args.keys() if k not in valid_fields])
     if dropped:
@@ -96,14 +108,19 @@ def main() -> None:
         help="Run CoT-only training (no implication stage)",
     )
     parser.add_argument(
-        "--implications_only",
+        "--combined",
         action="store_true",
-        help="Run implications-only training (no CoT stage)",
+        help="Run combined training (CoT and understanding stages)",
     )
     parser.add_argument(
         "--understanding_only",
         action="store_true",
         help="Run understanding-only training",
+    )
+    parser.add_argument(
+        "--simpl",
+        action="store_true",
+        help="Run the SImpL combined trainer (ideal version)",
     )
     parser.add_argument(
         "--wb_run_name",
@@ -112,10 +129,27 @@ def main() -> None:
         default=None,
         help="Override Weights & Biases run name (oat_args.wb_run_name)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed",
+    )
     cli_args, unknown_args = parser.parse_known_args()
 
+    set_seed(cli_args.seed)
+
     config = _load_config(cli_args.config)
-    config["oat_args"]["save_path"] = config.get("oat_args", {}).get("save_path", "oat-output") + f"/{config.get('preprocess', {}).get('dataset_name', 'race-c')}"
+    
+    if "oat_args" not in config:
+        config["oat_args"] = {}
+    config["oat_args"]["seed"] = cli_args.seed
+
+    dataset_name = config.get("preprocess", {}).get("dataset_name", "race-c")
+    config["oat_args"]["save_path"] = config.get("oat_args", {}).get("save_path", "oat-output") + f"/{dataset_name}"
+    # Propagate the dataset name so actors can select dataset-specific prompts
+    # (e.g. the understanding prompt). An explicit oat_args.dataset_name wins.
+    config["oat_args"].setdefault("dataset_name", dataset_name)
     # Process unknown arguments as overrides for config
     i = 0
     while i < len(unknown_args):
@@ -154,16 +188,17 @@ def main() -> None:
             i += 1
 
     cot_only = bool(config.get("cot_only", False) or cli_args.cot_only)
-    implications_only = bool(
-        config.get("implications_only", False) or cli_args.implications_only
+    combined = bool(
+        config.get("combined", False) or cli_args.combined
     )
     understanding_only = bool(
         config.get("understanding_only", False) or cli_args.understanding_only
     )
-    
-    modes_enabled = sum([cot_only, implications_only, understanding_only])
+    simpl = bool(config.get("simpl", False) or cli_args.simpl)
+
+    modes_enabled = sum([cot_only, combined, understanding_only, simpl])
     if modes_enabled > 1:
-        raise ValueError("Choose only one mode: cot_only, implications_only, or understanding_only")
+        raise ValueError("Choose only one mode: cot_only, combined, understanding_only, or simpl")
 
     prepared_data_path = _maybe_prepare_data(config)
 
@@ -189,18 +224,19 @@ def main() -> None:
     sanitized_oat_args, args_cls_name, run_fn, run_name = _sanitize_oat_args(
         oat_args,
         cot_only=cot_only,
-        implications_only=implications_only,
+        combined=combined,
         understanding_only=understanding_only,
+        simpl=simpl,
     )
     if args_cls_name == "CoTOnlyArgs":
         run_args = CoTOnlyArgs(**sanitized_oat_args)
-    # elif args_cls_name == "ImplicationsOnlyArgs":
-    #     run_args = ImplicationsOnlyArgs(**sanitized_oat_args)
+    elif args_cls_name == "SImpLArgs":
+        run_args = SImpLArgs(**sanitized_oat_args)
+    elif args_cls_name == "CoTAndUnderstandingArgs":
+        run_args = CoTAndUnderstandingArgs(**sanitized_oat_args)
     elif args_cls_name == "UnderstandingOnlyArgs":
         sanitized_oat_args["save_steps"] = 15
         run_args = UnderstandingOnlyArgs(**sanitized_oat_args)
-    # else:
-    #     run_args = SImpLArgs(**sanitized_oat_args)
 
     print(f"[run_with_config] Launching {run_name} run in-process")
     print(

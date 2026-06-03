@@ -19,7 +19,7 @@
         "gradient_checkpointing": true,
         "ref_offload": true,
         "zero_stage": 2,
-        "pretrain": "Qwen/Qwen3-4B",
+        "pretrain": "Qwen/Qwen3-4B-Base",
         "is_instruct": false,
         "learning_rate": 4e-06,
         "num_ppo_epochs": 1,
@@ -34,10 +34,9 @@
         "generate_max_length": 1024,
         "reasoning_num_samples": 8,
         "reasoning_max_tokens": 768,
-        "conciseness_penalty_k": 0.5,
+        "conciseness_penalty_k": 0.2,
         "use_baseline_reward": true,
         "qa_num_samples": 4,
-        "qa_train_max_tokens": 256,
         "qa_eval_max_tokens": 256,
         "correct_reward": 1.0,
         "incorrect_reward": 0.0,
@@ -62,6 +61,6 @@
         "use_wb": true,
         "wb_org": "anant-org",
         "wb_project": "SImpL-new",
-        "wb_run_name": "Qwen3-4B-Instruct"
+        "wb_run_name": "Qwen3-4B-Base-penalty-0.2"
     }
 }

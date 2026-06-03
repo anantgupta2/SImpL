@@ -22,7 +22,7 @@ from oat.types import TransitionData
 from oat.utils.data import PromptDataset, load_data_from_disk_or_hf
 from oat.utils.ops import masked_mean, masked_sum
 
-from src.utils.oat_prompt_templates import maybe_apply_chat_template, qa_cot_prompt
+from src.utils.oat_prompt_templates import qa_cot_prompt
 
 
 from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
@@ -41,12 +41,14 @@ class CoTOnlyArgs(PPOArgs):
     output_key: str = "questions"
     train_split: str = "train"
     max_train: int = 999999
+    seed: int = 42
 
     reasoning_num_samples: int = 8
     reasoning_max_tokens: int = 512
 
     incorrect_reward: float = 0.0
     correct_reward: float = 1.0
+    reward_scale: float = 2.0
 
     critic_type: Literal["ppo", "grpo", "drgrpo"] = field(default="drgrpo")
     remove_len_bias: bool = False
@@ -91,14 +93,13 @@ class CoTOnlyActor(PPOActor):
         self.correct_reward = float(self.args.correct_reward)
         self.incorrect_reward = float(self.args.incorrect_reward)
         self.is_instruct = bool(getattr(self.args, "is_instruct", False))
+        self.scale_reward = float(getattr(self.args, "reward_scale", 2.0))
 
         base_seed = int(getattr(self.args, "seed", 0))
         self.rng = np.random.default_rng(base_seed + int(actor_id))
 
         self.sampling_params.stop = None
         self.sampling_params.stop_token_ids = None
-        self.eval_sampling_params.stop = None
-        self.eval_sampling_params.stop_token_ids = None
 
     def _build_sampling_params(
         self,
@@ -232,6 +233,9 @@ class CoTOnlyActor(PPOActor):
                     reward = 0.1
                 else:
                     reward = self.incorrect_reward
+                
+                reward = reward * self.scale_reward
+                
                 loss_mask = True
                 valid_count += 1
                 correct_count += int(pred == gold)
@@ -294,7 +298,7 @@ class CoTOnlyLearner(PPOLearner):
         values = rewards.view(-1, self.args.num_samples).mean(dim=1)
         values = values.repeat_interleave(self.args.num_samples, dim=0)
         advantages = rewards - values
-        if (self.args.critic_type in ["grpo", "drgrpo"]) and (not self.args.remove_std_bias):
+        if (self.args.critic_type in ["grpo"]) and (not self.args.remove_std_bias):
             std_grouped_rewards = rewards.view(-1, self.args.num_samples).std(dim=1)
             std_grouped_rewards = std_grouped_rewards.repeat_interleave(
                 self.args.num_samples,
@@ -347,7 +351,7 @@ class CoTOnlyLearner(PPOLearner):
             remove_columns=train_dataset.column_names
         )
 
-        train_dataset = train_dataset.shuffle(seed=42)
+        # train_dataset = train_dataset.shuffle(seed=42)
 
         max_train = min(int(self.args.max_train), len(train_dataset))
         train_dataset = train_dataset.select(range(max_train))

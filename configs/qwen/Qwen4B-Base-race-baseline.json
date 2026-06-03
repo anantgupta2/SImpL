@@ -61,6 +61,6 @@
         "use_wb": true,
         "wb_org": "anant-org",
         "wb_project": "SImpL-new",
-        "wb_run_name": "Qwen3-4B-Base-baseline"
+        "wb_run_name": "Qwen3-4B-Base"
     }
 }

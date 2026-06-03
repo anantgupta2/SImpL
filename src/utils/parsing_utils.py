@@ -22,6 +22,18 @@ def extract_boxed_letter(text: str, num_options: int = 4) -> str:
     #     return plain[-1].upper()
     return ""
 
+def extract_yes_no(text: str) -> str:
+    """Return 'Yes', 'No', or '' from a reflection answer.
+    Prefers a \\boxed{Yes|No}; falls back to the last bare yes/no token."""
+    text = text or ""
+    boxed = re.findall(r"\\boxed\s*\{\s*(yes|no)\s*\}", text, re.IGNORECASE)
+    if boxed:
+        return boxed[-1].capitalize()
+    bare = re.findall(r"\b(yes|no)\b", text, re.IGNORECASE)
+    if bare:
+        return bare[-1].capitalize()
+    return ""
+
 def normalize_gold_letter(value: Any, num_options: int = 4) -> str:
     if value is None:
         return ""

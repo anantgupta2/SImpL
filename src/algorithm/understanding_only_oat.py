@@ -40,12 +40,13 @@ class UnderstandingOnlyArgs(PPOArgs):
     output_key: str = "questions"
     train_split: str = "train"
     max_train: int = 999999
+    seed: int = 42
+    dataset_name: str = "race-c"
 
     reasoning_num_samples: int = 8
     reasoning_max_tokens: int = 512
     qa_eval_max_tokens: int = 128
     qa_num_samples: int = 1
-    qa_eval_temperature: float = 1.0
 
     incorrect_reward: float = 0.0
     correct_reward: float = 1.0
@@ -55,7 +56,7 @@ class UnderstandingOnlyArgs(PPOArgs):
 
     critic_type: Literal["ppo", "grpo", "drgrpo"] = field(default="drgrpo")
     remove_len_bias: bool = False
-    remove_std_bias: bool = False
+    remove_std_bias: bool = True
 
     eval_steps: int = -1
     online_evaluation: bool = True
@@ -94,7 +95,7 @@ class UnderstandingOnlyActor(PPOActor):
         self.reasoning_max_tokens = int(self.args.reasoning_max_tokens)
         self.qa_eval_max_tokens = int(self.args.qa_eval_max_tokens)
         self.qa_num_samples = int(getattr(self.args, "qa_num_samples", 1))
-        self.qa_eval_temperature = float(getattr(self.args, "qa_eval_temperature", 1.0))
+        # self.sampling_params.temperature = float(getattr(self.args, "sampling_params.temperature", 1.0))
         self.correct_reward = float(self.args.correct_reward)
         self.incorrect_reward = float(self.args.incorrect_reward)
         self.conciseness_penalty_k = float(self.args.conciseness_penalty_k)
@@ -102,11 +103,10 @@ class UnderstandingOnlyActor(PPOActor):
         self.baseline_forgiven = int(getattr(self.args, "baseline_forgiven", 0))
         self.is_instruct = bool(getattr(self.args, "is_instruct", False))
         self.scale_reward = getattr(self.args, "reward_scale", 2.0)
+        self.dataset_name = str(getattr(self.args, "dataset_name", "race-c"))
 
         self.sampling_params.stop = None
         self.sampling_params.stop_token_ids = None
-        self.eval_sampling_params.stop = None
-        self.eval_sampling_params.stop_token_ids = None
 
     def _build_sampling_params(
         self,
@@ -214,7 +214,7 @@ class UnderstandingOnlyActor(PPOActor):
         eval_outputs = self.generate(
             eval_prompts,
             self._build_sampling_params(
-                temperature=self.qa_eval_temperature if self.qa_num_samples > 1 else 0.0,
+                temperature=self.sampling_params.temperature if self.qa_num_samples > 1 else 0.0,
                 max_tokens=self.qa_eval_max_tokens,
                 with_logprobs=False,
                 n=self.qa_num_samples,
@@ -263,7 +263,7 @@ class UnderstandingOnlyActor(PPOActor):
         understanding_prompts = []
         understanding_owner = []
         for doc_idx, article in enumerate(prompts):
-            prompt_text = understanding_prompt(article)
+            prompt_text = understanding_prompt(article, self.dataset_name)
             for _ in range(self.reasoning_num_samples):
                 understanding_prompts.append(
                     maybe_apply_chat_template(
@@ -381,14 +381,14 @@ class UnderstandingOnlyLearner(PPOLearner):
         self.args = args
         self.args.max_queries = np.inf
         self.masked_aggregator = (
-            functools.partial(masked_sum, constant_normalizer=args.generate_max_length)
+            functools.partial(masked_sum, constant_normalizer=args.reasoning_max_tokens)
             if args.critic_type == "drgrpo"
             else masked_mean
         )
         if args.critic_type in ["grpo", "ppo"] and args.remove_len_bias:
             self.masked_aggregator = functools.partial(
                 masked_sum,
-                constant_normalizer=args.generate_max_length,
+                constant_normalizer=args.reasoning_max_tokens,
             )
 
     def compute_monte_carlo_advantages(self, rewards, response_masks):
@@ -397,7 +397,7 @@ class UnderstandingOnlyLearner(PPOLearner):
         values = rewards.view(-1, self.args.num_samples).mean(dim=1)
         values = values.repeat_interleave(self.args.num_samples, dim=0)
         advantages = rewards - values
-        if (self.args.critic_type == "grpo") and (not self.args.remove_std_bias):
+        if (self.args.critic_type in ["grpo"]) and (not self.args.remove_std_bias):
             std_grouped_rewards = rewards.view(-1, self.args.num_samples).std(dim=1)
             std_grouped_rewards = std_grouped_rewards.repeat_interleave(
                 self.args.num_samples,
