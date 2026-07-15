@@ -9,10 +9,10 @@ import torch
 from typing import Any, Callable
 
 from src.utils.preprocess_data import create_or_load_preprocessed_data
-from src.algorithm.SImpL_oat import SImpLArgs, run_simpl_oat
+from src.algorithm.simpl_oat import SImpLArgs, run_simpl_oat
+from src.algorithm.simpl_no_bias_oat import SImpLNoBiasArgs, run_simpl_no_bias_oat
+from src.algorithm.simpl_split_oat import SImpLSplitArgs, run_simpl_split_oat
 from src.algorithm.cot_only_oat import CoTOnlyArgs, run_cot_only_oat
-from src.algorithm.cot_and_understanding_oat import CoTAndUnderstandingArgs, run_cot_and_understanding_oat
-from src.algorithm.understanding_only_oat import UnderstandingOnlyArgs, run_understandings_only_oat
 
 
 def set_seed(seed: int):
@@ -35,30 +35,30 @@ def _sanitize_oat_args(
     oat_args: dict[str, Any],
     *,
     cot_only: bool,
-    combined: bool,
-    understanding_only: bool,
     simpl: bool,
+    simpl_no_bias: bool,
+    simpl_split: bool = False,
 ) -> tuple[dict[str, Any], str, Callable[[Any], None], str]:
     if cot_only:
         valid_fields = set(CoTOnlyArgs.__dataclass_fields__.keys())
         args_cls_name = "CoTOnlyArgs"
         run_fn = run_cot_only_oat
         run_name = "CoT-only"
-    elif simpl:
+    elif simpl_split:
+        valid_fields = set(SImpLSplitArgs.__dataclass_fields__.keys())
+        args_cls_name = "SImpLSplitArgs"
+        run_fn = run_simpl_split_oat
+        run_name = "SImpL-split"
+    elif simpl_no_bias:
+        valid_fields = set(SImpLNoBiasArgs.__dataclass_fields__.keys())
+        args_cls_name = "SImpLNoBiasArgs"
+        run_fn = run_simpl_no_bias_oat
+        run_name = "SImpL-no-bias"
+    else:  # simpl
         valid_fields = set(SImpLArgs.__dataclass_fields__.keys())
         args_cls_name = "SImpLArgs"
         run_fn = run_simpl_oat
         run_name = "SImpL"
-    elif combined:
-        valid_fields = set(CoTAndUnderstandingArgs.__dataclass_fields__.keys())
-        args_cls_name = "CoTAndUnderstandingArgs"
-        run_fn = run_cot_and_understanding_oat
-        run_name = "Combined"
-    elif understanding_only:
-        valid_fields = set(UnderstandingOnlyArgs.__dataclass_fields__.keys())
-        args_cls_name = "UnderstandingOnlyArgs"
-        run_fn = run_understandings_only_oat
-        run_name = "Understanding-only"
     filtered = {k: v for k, v in oat_args.items() if k in valid_fields}
     dropped = sorted([k for k in oat_args.keys() if k not in valid_fields])
     if dropped:
@@ -108,19 +108,21 @@ def main() -> None:
         help="Run CoT-only training (no implication stage)",
     )
     parser.add_argument(
-        "--combined",
-        action="store_true",
-        help="Run combined training (CoT and understanding stages)",
-    )
-    parser.add_argument(
-        "--understanding_only",
-        action="store_true",
-        help="Run understanding-only training",
-    )
-    parser.add_argument(
         "--simpl",
         action="store_true",
-        help="Run the SImpL combined trainer (ideal version)",
+        help="Run the SImpL trainer (rotate: understanding + cot co-training)",
+    )
+    parser.add_argument(
+        "--simpl_no_bias",
+        action="store_true",
+        help="Run SImpL-no-bias (flattened data, plain single-question understanding "
+             "reward; no difficulty weighting / baseline pass / rotate)",
+    )
+    parser.add_argument(
+        "--simpl_split",
+        action="store_true",
+        help="Run SImpL-split (simpl_no_bias with decoupled num_understanding_rollouts / "
+             "num_cot_rollouts and optional understanding_every_k)",
     )
     parser.add_argument(
         "--wb_run_name",
@@ -188,17 +190,15 @@ def main() -> None:
             i += 1
 
     cot_only = bool(config.get("cot_only", False) or cli_args.cot_only)
-    combined = bool(
-        config.get("combined", False) or cli_args.combined
-    )
-    understanding_only = bool(
-        config.get("understanding_only", False) or cli_args.understanding_only
-    )
     simpl = bool(config.get("simpl", False) or cli_args.simpl)
+    simpl_no_bias = bool(config.get("simpl_no_bias", False) or cli_args.simpl_no_bias)
+    simpl_split = bool(config.get("simpl_split", False) or cli_args.simpl_split)
 
-    modes_enabled = sum([cot_only, combined, understanding_only, simpl])
+    modes_enabled = sum([cot_only, simpl, simpl_no_bias, simpl_split])
     if modes_enabled > 1:
-        raise ValueError("Choose only one mode: cot_only, combined, understanding_only, or simpl")
+        raise ValueError("Choose only one mode: cot_only, simpl, simpl_no_bias, or simpl_split")
+    if modes_enabled == 0:
+        raise ValueError("Choose a mode: --cot_only, --simpl, --simpl_no_bias, or --simpl_split")
 
     prepared_data_path = _maybe_prepare_data(config)
 
@@ -224,19 +224,18 @@ def main() -> None:
     sanitized_oat_args, args_cls_name, run_fn, run_name = _sanitize_oat_args(
         oat_args,
         cot_only=cot_only,
-        combined=combined,
-        understanding_only=understanding_only,
         simpl=simpl,
+        simpl_no_bias=simpl_no_bias,
+        simpl_split=simpl_split,
     )
     if args_cls_name == "CoTOnlyArgs":
         run_args = CoTOnlyArgs(**sanitized_oat_args)
-    elif args_cls_name == "SImpLArgs":
+    elif args_cls_name == "SImpLSplitArgs":
+        run_args = SImpLSplitArgs(**sanitized_oat_args)
+    elif args_cls_name == "SImpLNoBiasArgs":
+        run_args = SImpLNoBiasArgs(**sanitized_oat_args)
+    else:
         run_args = SImpLArgs(**sanitized_oat_args)
-    elif args_cls_name == "CoTAndUnderstandingArgs":
-        run_args = CoTAndUnderstandingArgs(**sanitized_oat_args)
-    elif args_cls_name == "UnderstandingOnlyArgs":
-        sanitized_oat_args["save_steps"] = 15
-        run_args = UnderstandingOnlyArgs(**sanitized_oat_args)
 
     print(f"[run_with_config] Launching {run_name} run in-process")
     print(

@@ -40,6 +40,17 @@ if [[ ! -d "$RUN_DIR" ]] && [[ -d "$CHECKPOINT_ROOT/$RUN_DIR" ]]; then
     RUN_DIR="$CHECKPOINT_ROOT/$RUN_DIR"
 fi
 
+if [[ -n "${STEP:-}" ]]; then
+    # Evaluate a SPECIFIC saved step (e.g. STEP=step_00150 or STEP=150) instead of
+    # the final one -- used to trace the learning curve / check whether accuracy is
+    # still climbing.
+    if [[ "$STEP" != step_* ]]; then STEP="step_$(printf '%05d' "$STEP")"; fi
+    FINAL_CHECKPOINT="$RUN_DIR/saved_models/$STEP"
+    if [[ ! -d "$FINAL_CHECKPOINT" ]]; then
+        echo "Requested STEP checkpoint not found: $FINAL_CHECKPOINT" >&2
+        exit 1
+    fi
+else
 FINAL_CHECKPOINT="$(
     {
         find "$RUN_DIR/saved_models" -mindepth 1 -maxdepth 1 -type d -name 'step_*' 2>/dev/null || true
@@ -49,6 +60,7 @@ FINAL_CHECKPOINT="$(
 if [[ -z "$FINAL_CHECKPOINT" ]]; then
     echo "No step_* or checkpoint-* checkpoint directories found under: $RUN_DIR" >&2
     exit 1
+fi
 fi
 
 FINAL_STEP_NAME="$(basename "$FINAL_CHECKPOINT")"
@@ -79,6 +91,12 @@ if [[ -n "$DATA_PATH" ]]; then
 fi
 if [[ "$IS_INSTRUCT" -eq 1 ]]; then
     CMD+=(--is_instruct)
+fi
+# Optional: multi-sample CoT eval (avg@N) for lower-variance estimates (e.g. LSAT).
+COT_SAMPLES="${COT_SAMPLES:-1}"
+if [[ "$COT_SAMPLES" -gt 1 ]]; then
+    CMD+=(--cot_samples "$COT_SAMPLES")
+    [[ -n "${COT_TEMPERATURE:-}" ]] && CMD+=(--cot_temperature "$COT_TEMPERATURE")
 fi
 
 "${CMD[@]}"

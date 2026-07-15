@@ -26,6 +26,7 @@ from src.utils.oat_prompt_templates import qa_cot_prompt
 
 
 from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
+from src.utils.fail_fast import fail_fast
 
 def collate_prompt_batch(batch):
     processed_prompts = [item[0] for item in batch]
@@ -42,6 +43,7 @@ class CoTOnlyArgs(PPOArgs):
     train_split: str = "train"
     max_train: int = 999999
     seed: int = 42
+    dataset_name: str = "race-c"
 
     reasoning_num_samples: int = 8
     reasoning_max_tokens: int = 512
@@ -59,7 +61,7 @@ class CoTOnlyArgs(PPOArgs):
     online_evaluation: bool = True
     apply_chat_template: bool = False
     is_instruct: bool = False
-    beta: float = 0.0
+    beta: float = -1.0  # -1 => use default 0.04; set in config to sweep
 
 
 def configure_cot_only_args(args: CoTOnlyArgs) -> CoTOnlyArgs:
@@ -74,7 +76,8 @@ def configure_cot_only_args(args: CoTOnlyArgs) -> CoTOnlyArgs:
     args.apply_chat_template = False
     args.online_evaluation = True
     args.eval_steps = -1
-    args.beta = 0.04
+    if float(args.beta) < 0:
+        args.beta = 0.04
     if 'qwen' in args.pretrain.lower():
         args.use_fused_lm_head = False
 
@@ -93,6 +96,7 @@ class CoTOnlyActor(PPOActor):
         self.correct_reward = float(self.args.correct_reward)
         self.incorrect_reward = float(self.args.incorrect_reward)
         self.is_instruct = bool(getattr(self.args, "is_instruct", False))
+        self.dataset_name = str(getattr(self.args, "dataset_name", "race-c"))
         self.scale_reward = float(getattr(self.args, "reward_scale", 2.0))
 
         base_seed = int(getattr(self.args, "seed", 0))
@@ -166,6 +170,7 @@ class CoTOnlyActor(PPOActor):
         picked_idx = int(self.rng.integers(0, len(valid)))
         return valid[picked_idx]
 
+    @fail_fast("CoTOnlyActor.step")
     def step(
         self,
         prompts: List[str],
@@ -191,6 +196,7 @@ class CoTOnlyActor(PPOActor):
                 article=article,
                 question_text=train_q["question"],
                 options=train_q["options"],
+                dataset_name=self.dataset_name,
             )
             for _ in range(self.reasoning_num_samples):
                 if self.is_instruct and hasattr(self.tokenizer, "apply_chat_template"):
@@ -277,6 +283,10 @@ class CoTOnlyActor(PPOActor):
 
 
 class CoTOnlyLearner(PPOLearner):
+    @fail_fast("CoTOnlyLearner.run")
+    def run(self):
+        return super().run()
+
     def _init(self, args: CoTOnlyArgs, actors: List[ActorBase]) -> None:
         super()._init(args, actors)
         self.args = args

@@ -1,0 +1,12 @@
+lsat-ar	cotn16100	123	11170176	sweep/scale100-lsat-cotn16-lr2e5-clip05-b02
+lsat-ar	cotn16100	234	11170177	sweep/scale100-lsat-cotn16-lr2e5-clip05-b02
+lsat-ar	cotn16100	345	11170178	sweep/scale100-lsat-cotn16-lr2e5-clip05-b02
+lsat-ar	u4c12100	123	11170179	sweep/scale100-lsat-flatsplit-u4c12-lr2e5-clip05-b02
+lsat-ar	u4c12100	234	11170180	sweep/scale100-lsat-flatsplit-u4c12-lr2e5-clip05-b02
+lsat-ar	u4c12100	345	11170181	sweep/scale100-lsat-flatsplit-u4c12-lr2e5-clip05-b02
+race-c	cotn16100	123	11170182	sweep/scale100-race-cotn16-lr2e5-clip05-b02
+race-c	cotn16100	234	11170183	sweep/scale100-race-cotn16-lr2e5-clip05-b02
+race-c	cotn16100	345	11170184	sweep/scale100-race-cotn16-lr2e5-clip05-b02
+race-c	u4c12100	123	11170185	sweep/scale100-race-flatsplitv3-u4c12-lr2e5-clip05-b02
+race-c	u4c12100	234	11170186	sweep/scale100-race-flatsplitv3-u4c12-lr2e5-clip05-b02
+race-c	u4c12100	345	11170187	sweep/scale100-race-flatsplitv3-u4c12-lr2e5-clip05-b02

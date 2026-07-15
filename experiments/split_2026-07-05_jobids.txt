@@ -1,0 +1,6 @@
+10803194	lsat-ar	flatsplit-u4c12	123	Qwen3-4B-sw-lsat50-flatsplit-u4c12-lr2e5-clip05-b02-t10_simpl-split_123
+10803195	lsat-ar	flatsplit-u4c12	234	Qwen3-4B-sw-lsat50-flatsplit-u4c12-lr2e5-clip05-b02-t10_simpl-split_234
+10803196	lsat-ar	flatsplit-u4c12	345	Qwen3-4B-sw-lsat50-flatsplit-u4c12-lr2e5-clip05-b02-t10_simpl-split_345
+10803197	lsat-ar	flatsplit-uevery4	123	Qwen3-4B-sw-lsat50-flatsplit-uevery4-lr2e5-clip05-b02-t10_simpl-split_123
+10803198	lsat-ar	flatsplit-uevery4	234	Qwen3-4B-sw-lsat50-flatsplit-uevery4-lr2e5-clip05-b02-t10_simpl-split_234
+10803199	lsat-ar	flatsplit-uevery4	345	Qwen3-4B-sw-lsat50-flatsplit-uevery4-lr2e5-clip05-b02-t10_simpl-split_345

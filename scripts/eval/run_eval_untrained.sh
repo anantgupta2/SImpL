@@ -15,12 +15,8 @@ source ~/r-nisha3-0/llm-env/bin/activate
 cd ~/scratch/SImpL
 set -euo pipefail
 
-# Optional Input BASE_MODEL $1
-if [[ $# -ge 1 ]]; then
-    BASE_MODEL="$1"
-else
-    BASE_MODEL="Qwen/Qwen2.5-7B-Instruct"
-fi
+# BASE_MODEL from positional $1, else the BASE_MODEL env var, else a default.
+BASE_MODEL="${1:-${BASE_MODEL:-Qwen/Qwen2.5-7B-Instruct}}"
 
 ## remove anything before the last slash
 MODEL_NAME="${BASE_MODEL##*/}"
@@ -57,14 +53,24 @@ CMD=(
     --gpu_memory_utilization 0.95
     --reasoning_max_tokens 1024
     --answer_max_tokens 1024
+    --eval_seed "${EVAL_SEED:-42}"
     --output_csv "$OUTPUT_CSV"
 )
 
 if [[ -n "$DATA_PATH" ]]; then
     CMD+=(--data_path "$DATA_PATH")
 fi
+# avg@N for reliable (low-variance) baselines; deterministic via --eval_seed.
+COT_SAMPLES="${COT_SAMPLES:-1}"
+if [[ "$COT_SAMPLES" -gt 1 ]]; then
+    CMD+=(--cot_samples "$COT_SAMPLES")
+fi
 if [[ "$IS_INSTRUCT" -eq 1 ]]; then
     CMD+=(--is_instruct)
+fi
+# Base model has no understanding behaviour -> only score plain CoT (faster, meaningful).
+if [[ "${COT_EVAL_ONLY:-0}" == "1" ]]; then
+    CMD+=(--cot_eval_only)
 fi
 
 "${CMD[@]}"

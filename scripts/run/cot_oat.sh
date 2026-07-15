@@ -18,7 +18,11 @@ set -euo pipefail
 
 MODEL_FAMILY="${3:-qwen}"
 SEED="${2:-42}"
+PRETRAIN="${4:-}"   # optional: override oat_args.pretrain (e.g. a per-seed merged cot base)
 CONFIG_FILE="configs/$MODEL_FAMILY/${1:-Qwen4B-Base-race}.json"
 echo "Using config file: $CONFIG_FILE"
 
-python -m src.run_with_config --config "$CONFIG_FILE" --cot_only --wb_run_name "cot-only_${SEED}" --seed "$SEED"
+EXTRA=()
+if [[ -n "$PRETRAIN" ]]; then EXTRA+=(--pretrain "$PRETRAIN"); fi
+
+python -m src.run_with_config --config "$CONFIG_FILE" --cot_only --wb_run_name "cot-only_${SEED}" --seed "$SEED" "${EXTRA[@]}"

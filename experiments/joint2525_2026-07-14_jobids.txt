@@ -1,0 +1,6 @@
+joint-lsat-race	cotn16	123	11188489	Qwen3-4B-sw-joint2525-cotn16-lr2e5-clip05-b02-t10_cot-only_123
+joint-lsat-race	cotn16	234	11188490	Qwen3-4B-sw-joint2525-cotn16-lr2e5-clip05-b02-t10_cot-only_234
+joint-lsat-race	cotn16	345	11188491	Qwen3-4B-sw-joint2525-cotn16-lr2e5-clip05-b02-t10_cot-only_345
+joint-lsat-race	u4c12	123	11188492	Qwen3-4B-sw-joint2525-flatsplit-u4c12-lr2e5-clip05-b02-t10_simpl-split_123
+joint-lsat-race	u4c12	234	11188493	Qwen3-4B-sw-joint2525-flatsplit-u4c12-lr2e5-clip05-b02-t10_simpl-split_234
+joint-lsat-race	u4c12	345	11188494	Qwen3-4B-sw-joint2525-flatsplit-u4c12-lr2e5-clip05-b02-t10_simpl-split_345

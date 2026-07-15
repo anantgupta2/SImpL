@@ -1,0 +1,12 @@
+11109895	lsat	flatsplit-u12c4	123	Qwen3-4B-sw-lsat50-flatsplit-u12c4-lr2e5-clip05-b02-t10_simpl-split_123
+11109896	lsat	flatsplit-u12c4	234	Qwen3-4B-sw-lsat50-flatsplit-u12c4-lr2e5-clip05-b02-t10_simpl-split_234
+11109897	lsat	flatsplit-u12c4	345	Qwen3-4B-sw-lsat50-flatsplit-u12c4-lr2e5-clip05-b02-t10_simpl-split_345
+11110565	lsat	flatsplit-u16c0	123	Qwen3-4B-sw-lsat50-flatsplit-u16c0-lr2e5-clip05-b02-t10_simpl-split_123
+11110566	lsat	flatsplit-u16c0	234	Qwen3-4B-sw-lsat50-flatsplit-u16c0-lr2e5-clip05-b02-t10_simpl-split_234
+11110567	lsat	flatsplit-u16c0	345	Qwen3-4B-sw-lsat50-flatsplit-u16c0-lr2e5-clip05-b02-t10_simpl-split_345
+11110604	race	flatsplitv3-u12c4	123	Qwen3-4B-sw-race50-flatsplitv3-u12c4-lr2e5-clip05-b02-t10_simpl-split_123
+11110605	race	flatsplitv3-u12c4	234	Qwen3-4B-sw-race50-flatsplitv3-u12c4-lr2e5-clip05-b02-t10_simpl-split_234
+11110606	race	flatsplitv3-u12c4	345	Qwen3-4B-sw-race50-flatsplitv3-u12c4-lr2e5-clip05-b02-t10_simpl-split_345
+11110607	race	flatsplitv3-u16c0	123	Qwen3-4B-sw-race50-flatsplitv3-u16c0-lr2e5-clip05-b02-t10_simpl-split_123
+11110608	race	flatsplitv3-u16c0	234	Qwen3-4B-sw-race50-flatsplitv3-u16c0-lr2e5-clip05-b02-t10_simpl-split_234
+11110609	race	flatsplitv3-u16c0	345	Qwen3-4B-sw-race50-flatsplitv3-u16c0-lr2e5-clip05-b02-t10_simpl-split_345
