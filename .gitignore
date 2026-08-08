@@ -224,3 +224,5 @@ data/
 slurm/
 oat-output/
 evaluations/
+experiments/
+paper/
