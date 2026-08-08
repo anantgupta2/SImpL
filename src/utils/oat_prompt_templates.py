@@ -141,6 +141,29 @@ def race_understanding_prompt_v3(article: str) -> str:
     )
 
 
+def race_understanding_prompt_v4(article: str) -> str:
+    # v4 (2026-07-22): identical to v3 in WHAT it asks for, but DROPS the brevity constraint
+    # ("Be brief: a few sharp lines...") and instead asks the model to SELECT the important
+    # content -- to test whether v3's terseness at deploy time is caused by the brevity demand.
+    # Same categories, same no-summarization rule, no length cap.
+    return (
+        "Read the passage and write the interpretive conclusions a reader needs that are NOT stated "
+        "outright. Do NOT summarize, restate, or describe the passage or its structure -- the reader "
+        "already has the passage in front of them. Focus on the content that matters: pick out and work "
+        "through the points a question is most likely to hinge on, in as much depth as each needs.\n\n"
+        "Cover:\n"
+        "- the key INFERENCES the passage forces but never says (what must be true; what the author would "
+        "agree or disagree with)\n"
+        "- the author's ATTITUDE/stance and the specific evidence that fixes it\n"
+        "- the intended meaning of any pivotal/figurative/unusual word AS USED HERE, and the referent of "
+        "any genuinely ambiguous pronoun\n"
+        "- any decisive contrast, cause-effect link, exception, or qualification a question could hinge on\n\n"
+        "Commit to conclusions; skip anything already explicit in the text. Wrap your understanding strictly "
+        "inside <understanding> and </understanding> tags.\n\n"
+        f"Passage:\n{article}\n"
+    )
+
+
 def quail_understanding_prompt(article: str) -> str:
     # QuAIL-specific: narrative comprehension whose questions probe TYPED reasoning
     # (causality, temporal order, event duration, subsequent state, belief states,
@@ -215,9 +238,20 @@ UNDERSTANDING_PROMPT_REGISTRY = {
 }
 
 
-def understanding_prompt(article: str, dataset_name: str | None = None, tagged: bool = True, answer_ready: bool = False) -> str:
+# opt-in prompt variants selected by config (understanding_prompt_version); default None keeps the
+# registry. Keyed (dataset_key, version) so existing runs are byte-identical.
+UNDERSTANDING_PROMPT_VERSIONS = {
+    ("race-c", "v4"): race_understanding_prompt_v4,
+    ("race-high", "v4"): race_understanding_prompt_v4,
+}
+
+
+def understanding_prompt(article: str, dataset_name: str | None = None, tagged: bool = True,
+                         answer_ready: bool = False, version: str | None = None) -> str:
     key = (dataset_name or "").strip().lower()
-    if key in UNDERSTANDING_PROMPT_REGISTRY:
+    if version and (key, version) in UNDERSTANDING_PROMPT_VERSIONS:
+        text = UNDERSTANDING_PROMPT_VERSIONS[(key, version)](article)
+    elif key in UNDERSTANDING_PROMPT_REGISTRY:
         text = UNDERSTANDING_PROMPT_REGISTRY[key](article)
     elif key.startswith("proofwriter"):  # prefix match for per-difficulty variants (proofwriter-d3)
         text = proofwriter_understanding_prompt(article)

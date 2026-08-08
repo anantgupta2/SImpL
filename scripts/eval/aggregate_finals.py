@@ -17,10 +17,8 @@ from statistics import mean, pstdev
 DEV = os.environ.get("AGG_DEV_DIR", "evaluations/finals_dev")
 TEST = os.environ.get("AGG_TEST_DIR", "evaluations/finals_test")
 DATASETS = ["lsat", "race", "quail"]
-METHOD_ORDER = ["cotn16", "nbmarg", "flatsimpl", "flatsimplv3", "nbmargurs1",
-                "flatsplit-u4c12", "flatsplit-uevery4", "flatsplitv3-u4c12",
-                "flatsimpl-long", "flatsplit-u4c12-long",
-                "cotn16-long", "flatsimplv3-long", "flatsplitv3-u4c12-long",
+METHOD_ORDER = ["cotn16", "flatsimpl", "flatsimplv3",
+                "flatsplit-u4c12", "flatsplitv3-u4c12",
                 "cotn16-a128",
                 "flatsimpl-a128",
                 "flatsplit-u4c12-a128", "flatsplit-u12c4", "flatsplit-u16c0",
@@ -129,9 +127,9 @@ def main():
             continue
         results = [(m, aggregate(ds, m, args.win, args.step_cap)) for m in methods]
         results = [(m, r) for m, r in results if r]
-        # baseline = cot16 control (fall back to cotn16-long when the plain one isn't present)
+        # baseline = cot16 control (8B-RACE only has the -short arm)
         base_row = next((r for m, r in results if m == "cotn16"), None) \
-            or next((r for m, r in results if m == "cotn16-long"), None)
+            or next((r for m, r in results if m == "cotn16-short"), None)
         base = base_row["devargmax_ps_mean"] if base_row else None      # CANONICAL baseline
         base_sa = base_row["devargmax_savg"] if base_row else None
         print(f"\n{'='*100}\n{ds.upper()}   test cot_acc%  (step-cap {args.step_cap}).  "

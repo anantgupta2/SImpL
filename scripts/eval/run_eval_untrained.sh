@@ -60,6 +60,19 @@ CMD=(
 if [[ -n "$DATA_PATH" ]]; then
     CMD+=(--data_path "$DATA_PATH")
 fi
+# Long-context (LongBench-v2 up to 128k): extend Qwen3 past native 32768 with YaRN.
+# NOTE: build the rope JSON HERE, not via --export -- SLURM --export splits on commas, so a JSON
+# value gets truncated at its first comma. Pass ROPE_YARN_FACTOR (a plain number) instead.
+if [[ -n "${MAX_MODEL_LEN:-}" ]]; then
+    CMD+=(--max_model_len "$MAX_MODEL_LEN")
+fi
+if [[ -n "${ROPE_YARN_FACTOR:-}" ]]; then
+    CMD+=(--rope_scaling "{\"rope_type\":\"yarn\",\"factor\":${ROPE_YARN_FACTOR},\"original_max_position_embeddings\":32768}")
+    # vLLM validates max_model_len against the BASE max_position_embeddings (32768) before applying
+    # the YaRN override, so it refuses 131072 without this. Safe here: YaRN is actually active (via
+    # hf_overrides), so extended positions are handled and do not nan.
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+fi
 # avg@N for reliable (low-variance) baselines; deterministic via --eval_seed.
 COT_SAMPLES="${COT_SAMPLES:-1}"
 if [[ "$COT_SAMPLES" -gt 1 ]]; then

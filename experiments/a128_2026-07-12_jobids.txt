@@ -1,9 +1,0 @@
-11075827	lsat	cotn16-a128	123	Qwen3-4B-sw-lsat50-cotn16-lr2e5-clip05-b02-t10-a128_cot-only_123
-11075833	lsat	cotn16-a128	234	Qwen3-4B-sw-lsat50-cotn16-lr2e5-clip05-b02-t10-a128_cot-only_234
-11075834	lsat	cotn16-a128	345	Qwen3-4B-sw-lsat50-cotn16-lr2e5-clip05-b02-t10-a128_cot-only_345
-11075906	lsat	flatsimpl-a128	123	Qwen3-4B-sw-lsat50-flatsimpl-lr2e5-clip05-b02-t10-a128_simpl-nb_123
-11075907	lsat	flatsimpl-a128	234	Qwen3-4B-sw-lsat50-flatsimpl-lr2e5-clip05-b02-t10-a128_simpl-nb_234
-11075908	lsat	flatsimpl-a128	345	Qwen3-4B-sw-lsat50-flatsimpl-lr2e5-clip05-b02-t10-a128_simpl-nb_345
-11075909	lsat	flatsplit-u4c12-a128	123	Qwen3-4B-sw-lsat50-flatsplit-u4c12-lr2e5-clip05-b02-t10-a128_simpl-split_123
-11075911	lsat	flatsplit-u4c12-a128	234	Qwen3-4B-sw-lsat50-flatsplit-u4c12-lr2e5-clip05-b02-t10-a128_simpl-split_234
-11075912	lsat	flatsplit-u4c12-a128	345	Qwen3-4B-sw-lsat50-flatsplit-u4c12-lr2e5-clip05-b02-t10-a128_simpl-split_345

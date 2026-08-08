@@ -1,2 +1,0 @@
-Qwen/Qwen3-4B-Base	4B
-Qwen/Qwen3-8B-Base	8B

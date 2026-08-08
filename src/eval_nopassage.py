@@ -116,7 +116,25 @@ def load_mcq_nopassage(data_path: str) -> List[Dict[str, Any]]:
     return out
 
 
-def load_gsm8k(max_n: Optional[int]) -> List[Dict[str, Any]]:
+def load_gsm8k(max_n: Optional[int], data_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """GSM8K test from HF, or -- when data_path is given -- a local GSM-style jsonl whose records
+    are {question, gold} with a NUMERIC gold (used for GSM-Symbolic, which has no '#### n' string).
+    """
+    if data_path:
+        rows = []
+        with open(data_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                g = r.get("gold", r.get("answer"))
+                if isinstance(g, str):          # tolerate the '#### n' string form too
+                    g = parse_gsm_gold(g)
+                if g is None or not str(r.get("question", "")).strip():
+                    continue
+                rows.append({"question": r["question"], "gold": float(g)})
+        return rows[:max_n] if max_n else rows
     from datasets import load_dataset
     ds = load_dataset("openai/gsm8k", "main", split="test")
     rows = [{"question": r["question"], "gold": parse_gsm_gold(r["answer"])} for r in ds]
@@ -142,7 +160,9 @@ def adapter_rank(ckpt: Path, default: int = 64) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True, choices=["mcq_nopassage", "gsm8k"])
-    ap.add_argument("--data_path", default=None, help="jsonl for mcq_nopassage")
+    ap.add_argument("--data_path", default=None,
+                    help="jsonl for mcq_nopassage; for gsm8k, a local GSM-style jsonl "
+                         "({question, gold}) e.g. GSM-Symbolic -- omit to use HF GSM8K test")
     ap.add_argument("--max_n", type=int, default=None, help="cap eval size (gsm8k)")
     ap.add_argument("--base_model", required=True)
     ap.add_argument("--checkpoint_dir", default=None,
@@ -167,7 +187,7 @@ def main() -> None:
         rows = load_mcq_nopassage(args.data_path)
         prompts = [arc_cot_prompt(r["question"], r["options"]) for r in rows]
     else:
-        rows = load_gsm8k(args.max_n)
+        rows = load_gsm8k(args.max_n, args.data_path)
         prompts = [gsm_cot_prompt(r["question"]) for r in rows]
     if not rows:
         raise SystemExit(f"No examples loaded for task={args.task}")

@@ -61,6 +61,14 @@ CMD=(
   --output_csv "$OUTPUT_CSV"
 )
 if [[ -n "${DATA_PATH:-}" ]]; then CMD+=(--data_path "$DATA_PATH"); fi
+# Long-context transfer targets (LongBench-v2 up to 128k): YaRN + eager. Pass ROPE_YARN_FACTOR (a
+# plain number, NOT JSON -- SLURM --export splits on commas). VLLM_ALLOW_LONG_MAX_MODEL_LEN lets
+# vLLM accept a max_model_len above the base 32768 (safe: YaRN is actually active).
+if [[ -n "${MAX_MODEL_LEN:-}" ]]; then CMD+=(--max_model_len "$MAX_MODEL_LEN"); fi
+if [[ -n "${ROPE_YARN_FACTOR:-}" ]]; then
+  CMD+=(--rope_scaling "{\"rope_type\":\"yarn\",\"factor\":${ROPE_YARN_FACTOR},\"original_max_position_embeddings\":32768}")
+  export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+fi
 # Only score plain CoT (skip understanding gen + the two understanding modes) -- ~3-4x faster.
 if [[ "${COT_EVAL_ONLY:-0}" == "1" ]]; then CMD+=(--cot_eval_only); fi
 # Resume by default (skip checkpoints already in the CSV); set REDO_ALL=1 to re-eval all.

@@ -5,8 +5,8 @@ The split is the only thing that varies: cot16 is the 0%-understanding end of th
 (16 cot rollouts, 0 understanding), u16c0 is the 100% end (understanding only, no cot rollouts).
 Values are the canonical convention: per-seed single-step dev-argmax, mean +- SEM over 3 seeds.
 
-`uevery4` is NOT on this axis (it is 8/8 but only emits understanding every 4th step) and is
-reported separately.
+`uevery4` (8/8 but emitting understanding only every 4th step) was the off-axis point; it was
+retired 2026-08-08 and its curves live in `evaluations/_archive/uevery4/`.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +25,7 @@ SPLITS = [
     ("u12c4  (75% und)", 12, 4, "flatsplit-u12c4", "flatsplitv3-u12c4"),
     ("u16c0  (100% und)", 16, 0, "flatsplit-u16c0", "flatsplitv3-u16c0"),
 ]
-OFF_AXIS = [("uevery4 (8/8, und every 4th step)", "flatsplit-uevery4", None)]
+OFF_AXIS = []
 
 
 def cell(ds, method):

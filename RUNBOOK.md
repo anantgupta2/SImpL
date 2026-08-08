@@ -22,6 +22,24 @@ splits in `data/SPLITS.md`; this file is the "how to run it" reference.
 
 ---
 
+## 0b. Repo layout (post-consolidation, 2026-08-08)
+
+Live surface only — everything else is under an `_archive`/`archive` dir and is kept for reference,
+not for running.
+
+| path | what |
+|---|---|
+| `src/algorithm/{cot_only,simpl_no_bias,simpl_split}_oat.py` | the three trainers. `simpl_split` **subclasses** `simpl_no_bias`, so neither can be dropped |
+| `src/algorithm/archive/` | `simpl_oat.py` (the pre-0614 rotate trainer) — dead, `--simpl` mode removed from `run_with_config.py` |
+| `scripts/run/` | `cot_oat.sh`, `simpl_no_bias_oat.sh`, `simpl_split_oat.sh` |
+| `scripts/eval/` | `auto_curve_eval.sh` (the worker), the two watchdogs, `eval_orchestrator`+`eval_worker`, `array_eval`, `run_eval_{nopassage,untrained}`, `transfer_drip`, `sweep_incomplete_evals`, table/aggregation `.py` |
+| `scripts/claude/` | dataset builders + `launch_transfers.py` |
+| `scripts/_archive/` | superseded launchers/wrappers (incl. `run_eval_final_saved_model.sh` — the live path is `python -m src.eval_saved_models`, called by `auto_curve_eval.sh`) |
+| `configs/qwen/{final,sweep}/` | see §2 |
+
+Selection rule used: a config/script is "live" iff a current eval CSV's `run_name` resolves to it, or
+a slurm job-name log shows it ran in the June–Aug 2026 window.
+
 ## 1. Data (see data/SPLITS.md for the full protocol)
 
 - Train files follow the loader convention `data/<ds>/<split>_<seed>_<num>.jsonl`
@@ -38,17 +56,39 @@ splits in `data/SPLITS.md`; this file is the "how to run it" reference.
 
 ## 2. Making a config
 
-Configs live in `configs/qwen/main/*.json`. Clone an existing one and edit `oat_args`. Clone pattern:
+Two config folders, both under `configs/qwen/` (the run scripts resolve `configs/<family>/<arg>.json`,
+so the arg you pass to `sbatch` is `final/<name>` or `sweep/<name>`):
+
+- **`configs/qwen/final/`** (43) — the runs behind every reported number: `final-8b-*`, `final-1p7b-*`,
+  the 4B `flatsplit-*` / `flatsimpl-*` / `cotn16-*` ablations, `race-*`, `quail-*`, `scale100-*`.
+  There is no "transfer" config set — transfer/OOD is an *eval* of an already-trained checkpoint (§9).
+  The joint LSAT+RACE runs were retired 2026-08-08 (out of the RC + long-context paper scope):
+  configs `git rm`'d, evals moved to `evaluations/_archive/joint/` (see its README),
+  `data/joint-lsat-race/` deleted, joint entries stripped from `launch_transfers.py`.
+- **`configs/qwen/sweep/`** (45) — the LR × clip HP grid (`{cotn16,flatsimpl}-{,1p7b-,8b-}lr*-clip*-b*`)
+  read off dev only. **All sweep runs are seed 42** (RUNBOOK convention: 42 = exploratory/sweep,
+  123/234/345 = the 3-seed CI runs) — don't mistake them for stray seeds and delete them.
+
+Name-suffix decoder:
+- **`-t10`** — `temperature: 1.0`, the *training* rollout temp. On every run and config; not a variant.
+  (Eval temp is 0.6 — see [[simpl-eval-conventions]].)
+- **`-long`** — identical to the base recipe but `num_prompt_epoch` 9→15 and `max_sgd_steps` 300→600.
+  The extra epochs turned out not to be needed; kept as the training-length control.
+- **`-short`** — the 8B RACE arms matched to the 4B step budget. These, not `-long`, are what the
+  transfer panel deploys (the long cot16 baseline is uneven across seeds).
+- **`v3`/`v4`** — understanding-prompt variants (`understanding_prompt_version`), not algorithm changes.
+
+Clone an existing one and edit `oat_args`. Clone pattern:
 
 ```python
 import json
-c = json.load(open("configs/qwen/main/lr64-8b-lsat50-nbmarg.json"))
+c = json.load(open("configs/qwen/final/final-8b-flatsplit-u4c12-lr2e5-clip05-b02.json"))
 c["oat_args"]["learning_rate"] = 3.2e-5        # lr
 c["oat_args"]["max_norm"]      = 1.0           # *** "clip" == max_norm (grad clip). clip05=0.5, clip1=1.0
-c["oat_args"]["wb_run_name"]   = "Qwen3-8B-Base-clip1lr32-lsat50-nbmarg"   # see naming bug below
+c["oat_args"]["wb_run_name"]   = "Qwen3-8B-final-lsat50-flatsplit-u4c12-clip1lr32"   # see naming bug below
 c["preprocess"]["num_samples"] = 25            # train subset size (25/50/100)
 c["oat_args"]["num_prompt_epoch"] = 72         # *** DOUBLE this when you HALVE num_samples (keeps step count ~constant; capped by max_sgd_steps)
-json.dump(c, open("configs/qwen/main/<newname>.json","w"), indent=4)
+json.dump(c, open("configs/qwen/final/<newname>.json","w"), indent=4)
 ```
 
 Key `oat_args` fields:
@@ -65,12 +105,13 @@ Key `oat_args` fields:
 **NAMING BUG (hit 3+ times):** the eval `RUN_PREFIX` is derived from `wb_run_name`, NOT the filename.
 Put the scale ("8b") and recipe in `wb_run_name` itself, or eval globs nothing.
 
-Recipes cheat-sheet:
+Recipes cheat-sheet (these three trainers are the whole live surface; see §8 for split):
 | name | mode | key | script |
 |---|---|---|---|
 | cot | CoT-only, 8 samples | reasoning_num_samples=8 | cot_oat.sh |
 | cot16 | CoT-only, 16 samples (compute control) | reasoning_num_samples=16 | cot_oat.sh |
-| nbmarg | SImpL no-bias (canonical) | simpl_no_bias=true | simpl_no_bias_oat.sh |
+| nbmarg / flatsimpl | SImpL no-bias (8:8) | simpl_no_bias=true | simpl_no_bias_oat.sh |
+| u4c12 (headline) | SImpL-split 4 und : 12 cot | simpl_split=true, num_understanding_rollouts=4, num_cot_rollouts=12 | simpl_split_oat.sh |
 
 ---
 
@@ -80,12 +121,14 @@ Recipes cheat-sheet:
 cd ~/scratch/SImpL
 EXCL="atl1-1-03-018-14-0,atl1-1-03-020-11-0"
 # cot / cot16:  args = <config-relpath-without-.json> <seed>
-sbatch --time=8:00:00 --exclude=$EXCL scripts/run/cot_oat.sh main/lr64-8b-lsat50-cot 123
-# nbmarg:
-sbatch --time=10:00:00 --exclude=$EXCL scripts/run/simpl_no_bias_oat.sh main/lr64-8b-lsat50-nbmarg 123
+sbatch --time=8:00:00 --exclude=$EXCL scripts/run/cot_oat.sh final/final-8b-cotn16-lr2e5-clip05-b02 123
+# nbmarg / flatsimpl:
+sbatch --time=10:00:00 --exclude=$EXCL scripts/run/simpl_no_bias_oat.sh final/final-8b-flatsimpl-lr2e5-clip05-b02 123
+# u4c12 (the headline split recipe):
+sbatch --time=10:00:00 --exclude=$EXCL scripts/run/simpl_split_oat.sh final/final-8b-flatsplit-u4c12-lr2e5-clip05-b02 123
 # 8B-RACE-nbmarg ONLY: add the OOM env (config already has tbspd=4) and 12h:
 sbatch --time=12:00:00 --exclude=$EXCL --export=ALL,PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  scripts/run/simpl_no_bias_oat.sh main/race50-8b-nbmarg-clip1-lr32 123
+  scripts/run/simpl_no_bias_oat.sh final/final-8b-race-flatsimplv3-short-lr2e5-clip05-b02 123
 ```
 Walltime guide: 4B ~3–7h; 8B LSAT cot ~2.5h / cot16 ~4h / nbmarg ~7h; 8B RACE cot/cot16 ~2.5–4h /
 nbmarg ~10–12h. Output run dir: `oat-output/<ds>/<wb_run_name>_<clisuffix>_<seed>_<timestamp>/`

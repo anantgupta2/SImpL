@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datasets import load_dataset, Dataset
+import hashlib
 import json
 import os
 import random
@@ -141,6 +142,15 @@ DATASET_REGISTRY = {
     # Einstein puzzle, i.e. exactly an LSAT logic game, in MC form.
     "zebralogic": {
         "hf_dataset": "WildEval/ZebraLogic", "subset": "mc_mode", "format": "zebralogic",
+    },
+    # QuALITY: long-document 4-way RC (~6.5k-token short stories). Understanding stress test --
+    # far longer passages than RACE (~435 tok), so if understanding = passage interpretation the
+    # gain should be LARGER here. EVAL-ONLY (articles exceed the 2048 training cap; eval uses 32k
+    # context). Test split unlabeled -> validation. `emozilla/quality` is the loadable parquet
+    # mirror (the canonical NYU QuALITY is a dataset script).
+    "quality": {
+        "hf_dataset": "emozilla/quality", "subset": None, "format": "quality",
+        "num_options": 4, "split_map": {"test": "validation"},
     },
     # tracking_shuffled_objects: track state through a sequence of swaps. Same input/target format
     # as logical_deduction, but its body ends mid-sentence -> needs a completion-style question.
@@ -556,6 +566,33 @@ def _standardize_bbh_logical_deduction(raw_dataset, question_text=None):
     return out
 
 
+def _standardize_quality(raw_dataset):
+    """QuALITY: LONG-document (short stories, ~6.5k tokens) 4-way RC. The ideal understanding
+    stress test -- if understanding = passage interpretation, a long passage should benefit MOST.
+    Rows: article, question, options (list of 4), answer (0-indexed int), hard (bool). Group
+    questions that share an article into one record, like RACE.
+    NOTE: articles far exceed the 2048 training prompt cap, so this is an EVAL/transfer target only
+    (eval uses Qwen3's 32k context, no truncation). `hard` is dropped here; filter upstream if
+    a hard-only split is wanted."""
+    grouped, order = {}, []
+    for idx, row in enumerate(raw_dataset):
+        art = str(row.get("article", "") or "").strip()
+        opts = _coerce_options(row.get("options", []))
+        a = row.get("answer")
+        if not art or len(opts) < 2 or not isinstance(a, int) or not (0 <= a < len(opts)):
+            continue
+        key = hashlib.md5(art.encode()).hexdigest()
+        if key not in grouped:
+            grouped[key] = {"example_id": f"quality_{key[:8]}", "article": art, "questions": []}
+            order.append(key)
+        grouped[key]["questions"].append({
+            "question": str(row.get("question", "") or ""),
+            "options": opts,
+            "answer": chr(ord("A") + a),
+        })
+    return [grouped[k] for k in order if grouped[k]["questions"]]
+
+
 def _standardize_zebralogic(raw_dataset):
     """ZebraLogic mc_mode: Einstein/zebra constraint puzzles -- the closest public analogue of an
     LSAT-AR logic game (fixed entity set, positional constraints, unique consistent assignment).
@@ -680,6 +717,8 @@ def preprocess_race_data(
         grouped_examples = _standardize_bbh_logical_deduction(raw_dataset, spec.get("question_text"))
     elif dataset_format == "zebralogic":
         grouped_examples = _standardize_zebralogic(raw_dataset)
+    elif dataset_format == "quality":
+        grouped_examples = _standardize_quality(raw_dataset)
     else:
         raise ValueError(f"Unsupported dataset format for {dataset_name}: {dataset_format}")
 

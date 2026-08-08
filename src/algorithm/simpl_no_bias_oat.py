@@ -47,7 +47,8 @@ from src.utils.oat_prompt_templates import (
     qa_cot_prompt,
     qa_eval_understanding_only_prompt,
 )
-from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
+from src.utils.parsing_utils import (extract_boxed_letter, normalize_gold_letter,
+                                     parse_questions)
 from src.utils.fail_fast import fail_fast
 
 
@@ -82,6 +83,10 @@ class SImpLNoBiasArgs(PPOArgs):
     # budget (finish_reason == "length" -> never closed </understanding>, degraded) gets its
     # reward zeroed out. False keeps the old behaviour (default).
     zero_understanding_on_truncation: bool = False
+
+    # Opt-in understanding-prompt variant (e.g. "v4" = RACE without the brevity demand). None keeps
+    # the dataset's registry prompt, so existing runs are unchanged.
+    understanding_prompt_version: str = None
 
     # Whether to show the passage alongside the understanding when scoring it.
     # Must match the evaluator's --understanding_with_passage flag.
@@ -279,7 +284,8 @@ class SImpLNoBiasActor(PPOActor):
             if not qs:
                 continue
             pt = understanding_prompt(prompts[d], self.dataset_name,
-                                      tagged=not self.use_full_understanding_output, answer_ready=self.qa_direct_answer)
+                                      tagged=not self.use_full_understanding_output, answer_ready=self.qa_direct_answer,
+                                      version=getattr(self.args, "understanding_prompt_version", None))
             for _ in range(self.reasoning_num_samples):
                 u_prompts.append(maybe_apply_chat_template(self.tokenizer, pt, self.is_instruct))
                 u_doc.append(d)

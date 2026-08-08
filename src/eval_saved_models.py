@@ -452,6 +452,7 @@ class CheckpointEvaluator:
         gpu_memory_utilization: float,
         dtype: str,
         max_model_len: Optional[int],
+        rope_scaling: Optional[Dict[str, Any]] = None,
         batch_size: int,
         reasoning_max_items: int,
         reasoning_max_tokens: int,
@@ -513,6 +514,13 @@ class CheckpointEvaluator:
         }
         if max_model_len is not None:
             llm_kwargs["max_model_len"] = int(max_model_len)
+        # YaRN rope scaling to run Qwen3 past its native 32768 ctx (e.g. LongBench-v2 up to 128k).
+        # Recipe mirrors inference-time-consolidation/itc_longbench. enforce_eager: the torch.compile /
+        # CUDA-graph kernels are captured for the base 32k shape and device-side-assert (out-of-bounds)
+        # at extended positions, so drop to eager for long context.
+        if rope_scaling:
+            llm_kwargs["hf_overrides"] = {"rope_scaling": dict(rope_scaling)}
+            llm_kwargs["enforce_eager"] = True
         if has_adapter:
             llm_kwargs["enable_lora"] = True
             llm_kwargs["max_loras"] = 1
@@ -913,6 +921,7 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                         gpu_memory_utilization=args.gpu_memory_utilization,
                         dtype=args.dtype,
                         max_model_len=args.max_model_len,
+                        rope_scaling=args.rope_scaling,
                         batch_size=args.batch_size,
                         reasoning_max_items=args.reasoning_max_items,
                         reasoning_max_tokens=args.reasoning_max_tokens,
@@ -941,6 +950,7 @@ def evaluate_checkpoints(args: argparse.Namespace) -> Tuple[List[CheckpointEvalR
                     gpu_memory_utilization=args.gpu_memory_utilization,
                     dtype=args.dtype,
                     max_model_len=args.max_model_len,
+                    rope_scaling=args.rope_scaling,
                     batch_size=args.batch_size,
                     reasoning_max_items=args.reasoning_max_items,
                     reasoning_max_tokens=args.reasoning_max_tokens,
@@ -1310,6 +1320,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--max_model_len", type=int, default=None)
+    parser.add_argument("--rope_scaling", type=str, default=None,
+                        help='JSON dict for YaRN long-context, e.g. \'{"rope_type":"yarn",'
+                             '"factor":4.0,"original_max_position_embeddings":32768}\'')
     parser.add_argument("--trust_remote_code", action="store_true")
 
     parser.add_argument("--batch_size", type=int, default=32)
@@ -1406,6 +1419,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # --rope_scaling arrives as a JSON string; parse to a dict (or None) for vLLM hf_overrides.
+    if isinstance(getattr(args, "rope_scaling", None), str) and args.rope_scaling.strip():
+        args.rope_scaling = json.loads(args.rope_scaling)
+    else:
+        args.rope_scaling = None
     t0 = time.time()
 
     results, sampled_outputs = evaluate_checkpoints(args)

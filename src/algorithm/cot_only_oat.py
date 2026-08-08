@@ -25,7 +25,8 @@ from oat.utils.ops import masked_mean, masked_sum
 from src.utils.oat_prompt_templates import qa_cot_prompt
 
 
-from src.utils.parsing_utils import extract_boxed_letter, normalize_gold_letter, parse_questions
+from src.utils.parsing_utils import (extract_boxed_letter, normalize_gold_letter,
+                                     parse_questions)
 from src.utils.fail_fast import fail_fast
 
 def collate_prompt_batch(batch):
